@@ -1,13 +1,12 @@
 // services/storage.service.js
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import config from "../config/index.js"; // or import env directly
 
 const s3 = new S3Client({
-  region: process.env.S3_REGION || config?.s3?.region,
-  endpoint: process.env.S3_ENDPOINT || config?.s3?.endpoint,
+  region: process.env.S3_REGION,
+  endpoint: process.env.S3_ENDPOINT,
   credentials: {
-    accessKeyId: process.env.S3_ACCESS_KEY_ID || config?.s3?.accessKeyId,
-    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || config?.s3?.secretAccessKey,
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
   },
   forcePathStyle: true // important for Backblaze
 });

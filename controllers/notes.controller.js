@@ -37,7 +37,7 @@ export const uploadNote = async (req, res) => {
       tags: tags ? (Array.isArray(tags) ? tags : String(tags).split(",").map(t => t.trim())) : []
     });
 
-    res.status(201).json({ message: "Note uploaded", note });
+    res.status(201).json({ success: true, message: "Note uploaded", url: url, note });
   } catch (err) {
     console.error("Upload note error:", err);
     res.status(500).json({ message: "Upload failed", error: err.message });
