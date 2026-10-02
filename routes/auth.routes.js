@@ -1,9 +1,35 @@
 import express from "express";
+import multer from "multer";
 import { body, validationResult } from "express-validator";
-import { registerUser, loginUser, logoutUser, verifyUser, forgotPassword } from "../controllers/auth.controller.js";
+import {
+  getProfilePhoto,
+  registerUser,
+  loginUser,
+  logoutUser,
+  verifyUser,
+  updateProfilePhoto,
+  forgotPassword,
+} from "../controllers/auth.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
 
 const router = express.Router();
+const allowedPhotoTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+const profilePhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => {
+    if (allowedPhotoTypes.has(file.mimetype)) return callback(null, true);
+    callback(new Error("Use a JPEG, PNG, or WebP image"));
+  },
+});
+
+const parseProfilePhoto = (req, res, next) => {
+  profilePhotoUpload.single("photo")(req, res, (error) => {
+    if (!error) return next();
+    const status = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    res.status(status).json({ message: error.message });
+  });
+};
 
 // Validation middleware for registration
 const registerValidation = [
@@ -34,6 +60,8 @@ router.post("/register", registerValidation, handleValidationErrors, registerUse
 router.post("/login", loginValidation, handleValidationErrors, loginUser);
 router.post("/logout", logoutUser);
 router.get("/verify", protect, verifyUser);
+router.get("/profile/photo", protect, getProfilePhoto);
+router.put("/profile/photo", protect, parseProfilePhoto, updateProfilePhoto);
 router.post("/forgot-password", forgotPassword);
 
 export default router;

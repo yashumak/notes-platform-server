@@ -1,75 +1,67 @@
-import express from 'express';
-import dotenv from 'dotenv';
-import mongoose from 'mongoose';
-import authRoutes from './routes/auth.routes.js';
-import notesRoutes from './routes/notes.routes.js';
-import cookieParser from 'cookie-parser';
-import cors from 'cors';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+// 🔥 LOAD ENV FIRST (VERY IMPORTANT)
+import dotenv from "dotenv";
+dotenv.config(); // loads backend/.env automatically
 
-import connectDB from './config/db.js';
+// ❌ DO NOT IMPORT ANYTHING ABOVE THIS LINE
 
-dotenv.config();
+import express from "express";
+import cookieParser from "cookie-parser";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+
+// Routes
+import authRoutes from "./routes/auth.routes.js";
+import notesRoutes from "./routes/notes.routes.js";
+import forgotPasswordRoute from "./routes/forgot-password.js";
+
+// DB
+import connectDB from "./config/db.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Connect to MongoDB
+// ------------------ DATABASE ------------------
 connectDB();
 
-// Middleware
+// ------------------ MIDDLEWARE ------------------
+app.use(express.json());
 app.use(cookieParser());
-app.use(express.json()); // For parsing application/json
-app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    credentials: true,
+  })
+);
+
 app.use(helmet());
 
-// CSRF protection
-
-
-
-// Rate limiting to prevent brute-force attacks
+// ------------------ RATE LIMIT ------------------
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // max 100 requests per 15 minutes per IP
-  message: 'Too many requests from this IP, please try again after 15 minutes',
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: "Too many requests from this IP, please try again later",
 });
 app.use(limiter);
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/notes', notesRoutes);
+// ------------------ ROUTES ------------------
+app.use("/api/auth", authRoutes);
+app.use("/api/auth", forgotPasswordRoute);
+app.use("/api/notes", notesRoutes);
 
-// CSRF token endpoint
-
-
-// Basic error handling middleware
+// ------------------ ERROR HANDLER ------------------
 app.use((err, req, res, next) => {
-  console.error('Backend Error:', err.message);
-  console.error('Error Stack:', err.stack);
-  console.error('Request Body:', req.body);
-  console.error('Request Headers:', req.headers);
+  console.error("Backend Error:", err.message);
+  console.error("Stack:", err.stack);
 
-  let statusCode = 500;
-  let message = 'Something went wrong!';
-
-  if (err.code === 'EBADCSRFTOKEN') {
-    statusCode = 403;
-    message = 'Invalid CSRF token';
-  } else if (err.name === 'CastError') {
-    statusCode = 400;
-    message = 'Invalid ID';
-  } else if (err.name === 'ValidationError') { // Mongoose validation errors
-    statusCode = 400;
-    message = err.message;
-  } else if (err.array) { // express-validator errors
-    statusCode = 400;
-    message = err.array().map(error => error.msg).join(', ');
-  }
-
-  res.status(statusCode).json({ message });
+  res.status(500).json({
+    message: "Upload failed",
+    error: err.message,
+  });
 });
 
+// ------------------ SERVER ------------------
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });

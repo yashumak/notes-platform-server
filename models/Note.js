@@ -4,7 +4,10 @@ const noteSchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
     description: { type: String },
-    fileUrl: { type: String }, // Cloudflare / Backblaze URL
+    fileId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    fileName: { type: String, required: true },
+    contentType: { type: String, required: true },
+    fileSize: { type: Number, required: true },
     university: { type: String },
     course: { type: String },
     studyType: { type: String }, // Notes, Assignments, Papers, Que Banks, PPT...
@@ -13,6 +16,7 @@ const noteSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+    tags: [{ type: String }],
   },
   { timestamps: true }
 );

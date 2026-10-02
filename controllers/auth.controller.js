@@ -1,6 +1,12 @@
 import User from "../models/User.js";
+import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+
+const getProfilePhotosBucket = () =>
+  new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
+    bucketName: "profilePhotos",
+  });
 
 // Register
 export const registerUser = async (req, res) => {
@@ -74,13 +80,101 @@ export const logoutUser = (req, res) => {
   }).json({ message: "Logged out successfully" });
 };
 
-// Verify (check if user is authenticated)
-export const verifyUser = (req, res) => {
-  // If protect middleware has run, req.user will be populated
-  if (req.user) {
-    return res.json({ isAuthenticated: true, user: req.user });
+// Verify the session and return the minimal user details needed by the UI.
+export const verifyUser = async (req, res) => {
+  const user = await User.findById(req.user.id).select(
+    "name email university course year profilePhotoFileId"
+  );
+
+  if (!user) {
+    return res.status(401).json({ isAuthenticated: false, message: "Not authenticated" });
   }
-  res.status(401).json({ isAuthenticated: false, message: "Not authenticated" });
+
+  res.json({
+    isAuthenticated: true,
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      university: user.university,
+      course: user.course,
+      year: user.year,
+      profilePhotoUrl: user.profilePhotoFileId
+        ? `/api/auth/profile/photo?v=${user.profilePhotoFileId}`
+        : null,
+    },
+  });
+};
+
+export const getProfilePhoto = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("profilePhotoFileId profilePhotoContentType");
+    if (!user?.profilePhotoFileId) {
+      return res.status(404).json({ message: "Profile photo not found" });
+    }
+
+    const downloadStream = getProfilePhotosBucket().openDownloadStream(user.profilePhotoFileId);
+    res.setHeader("Content-Type", user.profilePhotoContentType || "application/octet-stream");
+    res.setHeader("Cache-Control", "private, no-cache");
+    downloadStream.on("error", (error) => {
+      if (res.headersSent) {
+        res.destroy(error);
+      } else {
+        res.status(404).json({ message: "Profile photo not found" });
+      }
+    });
+    downloadStream.pipe(res);
+  } catch (error) {
+    console.error("Get profile photo error:", error);
+    res.status(500).json({ message: "Could not load profile photo" });
+  }
+};
+
+export const updateProfilePhoto = async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ message: "Choose an image to upload" });
+  }
+
+  const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+  if (!allowedTypes.has(req.file.mimetype)) {
+    return res.status(400).json({ message: "Use a JPEG, PNG, or WebP image" });
+  }
+
+  let bucket;
+  let newFileId;
+
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    bucket = getProfilePhotosBucket();
+    const oldFileId = user.profilePhotoFileId;
+    const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
+      metadata: { contentType: req.file.mimetype },
+    });
+    newFileId = uploadStream.id;
+
+    await new Promise((resolve, reject) => {
+      uploadStream.once("finish", resolve);
+      uploadStream.once("error", reject);
+      uploadStream.end(req.file.buffer);
+    });
+
+    user.profilePhotoFileId = newFileId;
+    user.profilePhotoContentType = req.file.mimetype;
+    await user.save();
+
+    if (oldFileId) await bucket.delete(oldFileId).catch(() => { });
+
+    res.json({
+      success: true,
+      profilePhotoUrl: `/api/auth/profile/photo?v=${newFileId}`,
+    });
+  } catch (error) {
+    if (bucket && newFileId) await bucket.delete(newFileId).catch(() => { });
+    console.error("Update profile photo error:", error);
+    res.status(500).json({ message: "Could not update profile photo" });
+  }
 };
 
 // Forgot Password (placeholder)

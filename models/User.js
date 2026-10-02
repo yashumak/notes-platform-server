@@ -8,6 +8,8 @@ const userSchema = new mongoose.Schema(
     university: { type: String, required: true },
     course: { type: String, required: true },
     year: { type: String, required: true },
+    profilePhotoFileId: { type: mongoose.Schema.Types.ObjectId },
+    profilePhotoContentType: { type: String },
   },
   { timestamps: true }
 );
