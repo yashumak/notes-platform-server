@@ -8,6 +8,13 @@ const getProfilePhotosBucket = () =>
     bucketName: "profilePhotos",
   });
 
+const authCookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "strict",
+  path: "/",
+};
+
 // Register
 export const registerUser = async (req, res) => {
   try {
@@ -31,11 +38,9 @@ export const registerUser = async (req, res) => {
       expiresIn: "7d",
     });
 
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    res.cookie("token", token, {
+      ...authCookieOptions,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     }).status(201).json({ message: "Registration successful" });
   } catch (error) {
     console.error("Registration error in auth.controller.js:", error.stack || error);
@@ -58,11 +63,9 @@ export const loginUser = async (req, res) => {
       expiresIn: "7d",
     });
 
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    res.cookie("token", token, {
+      ...authCookieOptions,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     }).json({ message: "Login successful" });
   } catch (error) {
     console.error("Login error in auth.controller.js:", error);
@@ -72,12 +75,9 @@ export const loginUser = async (req, res) => {
 
 // Logout
 export const logoutUser = (req, res) => {
-  res.cookie('token', '', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    expires: new Date(0)
-  }).json({ message: "Logged out successfully" });
+  res.clearCookie("token", authCookieOptions);
+  res.clearCookie("token", { ...authCookieOptions, path: "/api/auth" });
+  res.json({ message: "Logged out successfully" });
 };
 
 // Verify the session and return the minimal user details needed by the UI.
