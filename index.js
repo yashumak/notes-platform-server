@@ -13,7 +13,6 @@ import rateLimit from "express-rate-limit";
 // Routes
 import authRoutes from "./routes/auth.routes.js";
 import notesRoutes from "./routes/notes.routes.js";
-import forgotPasswordRoute from "./routes/forgot-password.js";
 
 // DB
 import connectDB from "./config/db.js";
@@ -47,7 +46,6 @@ app.use(limiter);
 
 // ------------------ ROUTES ------------------
 app.use("/api/auth", authRoutes);
-app.use("/api/auth", forgotPasswordRoute);
 app.use("/api/notes", notesRoutes);
 
 // ------------------ ERROR HANDLER ------------------

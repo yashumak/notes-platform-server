@@ -177,9 +177,33 @@ export const updateProfilePhoto = async (req, res) => {
   }
 };
 
-// Forgot Password (placeholder)
-export const forgotPassword = (req, res) => {
-  // In a real application, this would send a password reset email
-  console.log("Forgot password request for:", req.body.email);
-  res.status(200).json({ message: "If an account with that email exists, a password reset link has been sent." });
+// Forgot Password
+export const forgotPassword = async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ message: "Email and new password are required." });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters." });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ message: "User not found." });
+
+    if (await bcrypt.compare(newPassword, user.password)) {
+      return res.status(400).json({ message: "Your new password must be different from your current password." });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+
+    return res.json({ message: "Password updated successfully. Please login with your new password." });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    return res.status(500).json({ message: "Could not update your password." });
+  }
 };
