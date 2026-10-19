@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "build": "node --check index.js",
     "dev": "nodemon index.js",
     "start": "node index.js",
     "test": "jest"

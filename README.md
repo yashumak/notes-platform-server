@@ -30,6 +30,32 @@ This directory contains the backend services for the Notes Platform application.
     npm start
     ```
 
+## Production Deployment
+
+This backend is plain Node.js and does not need a compilation step. The `build`
+script runs a Node.js syntax check so platforms configured with `npm run build`
+can complete their build phase.
+
+For Railway (or another Node.js host), configure the service to use this
+directory as its root if deploying from the monorepo, then use:
+
+- **Build command**: `npm run build` (or `npm install`; no bundling is required)
+- **Start command**: `npm start`
+
+Set these backend environment variables in the hosting service:
+
+- `MONGO_URI`: production MongoDB connection string
+- `JWT_SECRET`: a strong, private signing secret
+- `FRONTEND_URL`: the deployed Vercel origin, for example
+  `https://your-app.vercel.app` (no trailing slash)
+- `PORT`: only if required by the host; the service also honors the host-provided
+  `PORT`
+
+In Vercel, set `NEXT_PUBLIC_BACKEND_URL` to the backend's public base URL,
+for example `https://your-service.up.railway.app`, with no trailing slash, and
+redeploy the frontend. The frontend's Next.js rewrite forwards `/api/*` requests
+to this URL. Do not use `localhost` in production.
+
 ## API Endpoints
 
 ### Authentication
