@@ -36,11 +36,14 @@ This backend is plain Node.js and does not need a compilation step. The `build`
 script runs a Node.js syntax check so platforms configured with `npm run build`
 can complete their build phase.
 
-For Railway (or another Node.js host), configure the service to use this
+For Render (or another Node.js host), configure the service to use this
 directory as its root if deploying from the monorepo, then use:
 
-- **Build command**: `npm run build` (or `npm install`; no bundling is required)
+- **Build command**: `npm install && npm run build`
 - **Start command**: `npm start`
+
+The build command must install dependencies. Running only `npm run build`
+performs the syntax check but does not install packages such as `dotenv`.
 
 Set these backend environment variables in the hosting service:
 
