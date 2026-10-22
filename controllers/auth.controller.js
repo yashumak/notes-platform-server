@@ -2,6 +2,7 @@ import User from "../models/User.js";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { AUTH_SESSION_SECONDS } from "../config/auth.js";
 
 const getProfilePhotosBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
@@ -35,12 +36,12 @@ export const registerUser = async (req, res) => {
     });
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
+      expiresIn: AUTH_SESSION_SECONDS,
     });
 
     res.cookie("token", token, {
       ...authCookieOptions,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: AUTH_SESSION_SECONDS * 1000,
     }).status(201).json({ message: "Registration successful" });
   } catch (error) {
     console.error("Registration error in auth.controller.js:", error.stack || error);
@@ -60,12 +61,12 @@ export const loginUser = async (req, res) => {
     if (!match) return res.status(400).json({ message: "Incorrect password" });
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
+      expiresIn: AUTH_SESSION_SECONDS,
     });
 
     res.cookie("token", token, {
       ...authCookieOptions,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: AUTH_SESSION_SECONDS * 1000,
     }).json({ message: "Login successful" });
   } catch (error) {
     console.error("Login error in auth.controller.js:", error);
@@ -82,6 +83,10 @@ export const logoutUser = (req, res) => {
 
 // Verify the session and return the minimal user details needed by the UI.
 export const verifyUser = async (req, res) => {
+  const expiresAt = Math.min(
+    req.user.exp,
+    req.user.iat + AUTH_SESSION_SECONDS
+  ) * 1000;
   const user = await User.findById(req.user.id).select(
     "name email university course year profilePhotoFileId"
   );
@@ -92,6 +97,7 @@ export const verifyUser = async (req, res) => {
 
   res.json({
     isAuthenticated: true,
+    expiresAt,
     user: {
       id: user.id,
       name: user.name,
