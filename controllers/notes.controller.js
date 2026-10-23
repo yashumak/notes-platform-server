@@ -98,6 +98,31 @@ export const listMyNotes = async (req, res) => {
   }
 };
 
+export const deleteMyNote = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ message: "Invalid note ID" });
+    }
+
+    const note = await Note.findOne({
+      _id: req.params.id,
+      uploadedBy: req.user.id,
+    }).select("fileId");
+
+    if (!note) {
+      return res.status(404).json({ message: "Note not found" });
+    }
+
+    await getNoteFilesBucket().delete(note.fileId);
+    await note.deleteOne();
+
+    return res.json({ success: true, message: "Note deleted successfully" });
+  } catch (err) {
+    console.error("Delete note error:", err);
+    return res.status(500).json({ message: "Could not delete note" });
+  }
+};
+
 export const downloadNoteFile = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
