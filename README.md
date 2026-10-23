@@ -71,6 +71,7 @@ to this URL. Do not use `localhost` in production.
 ### Notes
 
 - `POST /api/notes/upload` (authenticated multipart upload; file field: `file`)
+- `DELETE /api/notes/:id` (authenticated; deletes only a note uploaded by the current user)
 - `GET /api/notes/:id/file` (download a stored note file)
 
 Uploaded content is stored in the MongoDB `noteFiles.files` and
