@@ -136,6 +136,80 @@ export const getProfilePhoto = async (req, res) => {
   }
 };
 
+export const updateProfile = async (req, res) => {
+  let bucket;
+  let newFileId;
+
+  try {
+    const { name, email, university, course, year } = req.body;
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const existingUser = await User.findOne({ email, _id: { $ne: user._id } });
+    if (existingUser) {
+      return res.status(409).json({ message: "An account with this email already exists" });
+    }
+
+    const oldFileId = user.profilePhotoFileId;
+    if (req.file) {
+      bucket = getProfilePhotosBucket();
+      const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
+        metadata: { contentType: req.file.mimetype },
+      });
+      newFileId = uploadStream.id;
+
+      await new Promise((resolve, reject) => {
+        uploadStream.once("finish", resolve);
+        uploadStream.once("error", reject);
+        uploadStream.end(req.file.buffer);
+      });
+    }
+
+    user.name = name;
+    user.email = email;
+    user.university = university;
+    user.course = course;
+    user.year = year;
+    if (req.file && newFileId) {
+      user.profilePhotoFileId = newFileId;
+      user.profilePhotoContentType = req.file.mimetype;
+    }
+    await user.save();
+
+    if (req.file && oldFileId && bucket) {
+      await bucket.delete(oldFileId).catch((error) => {
+        console.error("Could not remove previous profile photo:", error);
+      });
+    }
+
+    return res.json({
+      success: true,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        university: user.university,
+        course: user.course,
+        year: user.year,
+        profilePhotoUrl: user.profilePhotoFileId
+          ? `/api/auth/profile/photo?v=${user.profilePhotoFileId}`
+          : null,
+      },
+    });
+  } catch (error) {
+    if (bucket && newFileId) {
+      await bucket.delete(newFileId).catch((cleanupError) => {
+        console.error("Could not remove incomplete profile photo:", cleanupError);
+      });
+    }
+    if (error.code === 11000) {
+      return res.status(409).json({ message: "An account with this email already exists" });
+    }
+    console.error("Update profile error:", error);
+    return res.status(500).json({ message: "Could not update your profile" });
+  }
+};
+
 export const updateProfilePhoto = async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ message: "Choose an image to upload" });
