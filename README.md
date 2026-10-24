@@ -5,6 +5,7 @@ This directory contains the backend services for the Notes Platform application.
 ## Features
 
 - User Authentication (Registration, Login, Logout, Session Management)
+- Authenticated profile updates, including study details and profile photos
 - Note file uploads stored in MongoDB GridFS
 
 ## Setup
@@ -67,6 +68,12 @@ to this URL. Do not use `localhost` in production.
 - `POST /api/auth/login`
 - `GET /api/auth/verify`
 - `POST /api/auth/logout`
+- `PUT /api/auth/profile` (authenticated multipart update; optional `photo` field)
+- `GET /api/auth/profile/photo`
+
+General API traffic is limited to 1,000 requests per IP per 15 minutes. Login
+requests have a separate limit of 10 failed attempts per IP per 15 minutes;
+successful logins do not count toward that limit.
 
 ### Notes
 
