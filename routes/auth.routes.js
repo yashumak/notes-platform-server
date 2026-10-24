@@ -1,5 +1,6 @@
 import express from "express";
 import multer from "multer";
+import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import {
   getProfilePhoto,
@@ -7,12 +8,21 @@ import {
   loginUser,
   logoutUser,
   verifyUser,
+  updateProfile,
   updateProfilePhoto,
   forgotPassword,
 } from "../controllers/auth.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
 
 const router = express.Router();
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many failed login attempts. Please try again in 15 minutes." },
+});
 const allowedPhotoTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 const profilePhotoUpload = multer({
   storage: multer.memoryStorage(),
@@ -47,6 +57,14 @@ const loginValidation = [
   body("password").notEmpty().withMessage("Password is required"),
 ];
 
+const profileValidation = [
+  body("name").trim().notEmpty().isLength({ max: 100 }).withMessage("Name is required and must be at most 100 characters"),
+  body("email").trim().isEmail().withMessage("Enter a valid email address"),
+  body("university").trim().notEmpty().isLength({ max: 200 }).withMessage("College or university is required and must be at most 200 characters"),
+  body("course").trim().notEmpty().isLength({ max: 100 }).withMessage("Branch or course is required and must be at most 100 characters"),
+  body("year").trim().notEmpty().isLength({ max: 50 }).withMessage("Year is required and must be at most 50 characters"),
+];
+
 // Middleware to handle validation results
 const handleValidationErrors = (req, res, next) => {
   const errors = validationResult(req);
@@ -57,10 +75,11 @@ const handleValidationErrors = (req, res, next) => {
 };
 
 router.post("/register", registerValidation, handleValidationErrors, registerUser);
-router.post("/login", loginValidation, handleValidationErrors, loginUser);
+router.post("/login", loginLimiter, loginValidation, handleValidationErrors, loginUser);
 router.post("/logout", logoutUser);
 router.get("/verify", protect, verifyUser);
 router.get("/profile/photo", protect, getProfilePhoto);
+router.put("/profile", protect, parseProfilePhoto, profileValidation, handleValidationErrors, updateProfile);
 router.put("/profile/photo", protect, parseProfilePhoto, updateProfilePhoto);
 router.post("/forgot-password", forgotPassword);
 
