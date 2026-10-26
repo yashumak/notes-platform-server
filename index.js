@@ -9,6 +9,7 @@ import cookieParser from "cookie-parser";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
+import { logError, logInfo } from "./utils/logger.js";
 
 // Routes
 import authRoutes from "./routes/auth.routes.js";
@@ -19,6 +20,11 @@ import connectDB from "./config/db.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+if (!process.env.JWT_SECRET || Buffer.byteLength(process.env.JWT_SECRET) < 32) {
+  logError("startup.jwt_secret_missing_or_weak");
+  process.exit(1);
+}
 
 // ------------------ DATABASE ------------------
 connectDB();
@@ -50,18 +56,35 @@ app.use(limiter);
 app.use("/api/auth", authRoutes);
 app.use("/api/notes", notesRoutes);
 
-// ------------------ ERROR HANDLER ------------------
-app.use((err, req, res, next) => {
-  console.error("Backend Error:", err.message);
-  console.error("Stack:", err.stack);
+app.use((_req, res) => {
+  res.status(404).json({ message: "Not found" });
+});
 
-  res.status(500).json({
-    message: "Upload failed",
-    error: err.message,
+// ------------------ ERROR HANDLER ------------------
+app.use((err, _req, res, _next) => {
+  const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 500;
+  const isUploadInputError =
+    err.code === "LIMIT_FILE_SIZE" ||
+    err.code === "LIMIT_FIELD_VALUE" ||
+    err.message === "Unsupported file type";
+  const responseStatus = isUploadInputError ? (status === 413 ? 413 : 400) : status;
+  logError(
+    responseStatus === 413
+      ? "request.upload_too_large"
+      : responseStatus === 400
+        ? "request.upload_rejected"
+        : "request.failed"
+  );
+  res.status(responseStatus).json({
+    message: responseStatus === 413
+      ? "Uploaded file or request exceeds the allowed size"
+      : responseStatus === 400
+        ? "Upload request was rejected"
+        : "Request failed",
   });
 });
 
 // ------------------ SERVER ------------------
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  logInfo("server.started");
 });

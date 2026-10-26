@@ -77,9 +77,16 @@ successful logins do not count toward that limit.
 
 ### Notes
 
+- `GET /api/notes` and `GET /api/notes/:id/file` require authentication. Notes remain shared among signed-in users.
 - `POST /api/notes/upload` (authenticated multipart upload; file field: `file`)
 - `DELETE /api/notes/:id` (authenticated; deletes only a note uploaded by the current user)
 - `GET /api/notes/:id/file` (download a stored note file)
 
 Uploaded content is stored in the MongoDB `noteFiles.files` and
 `noteFiles.chunks` GridFS collections. No external object storage is required.
+
+Login passwords must be sent from the browser to the server for authentication.
+They are hashed before storage, are not returned in API responses, and must
+never be logged. Users can still inspect their own request payloads in browser
+Developer Tools; HTTPS protects credentials in transit but cannot hide a
+request from the browser that created it.

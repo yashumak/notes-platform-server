@@ -1,11 +1,36 @@
 // controllers/notes.controller.js
 import mongoose from "mongoose";
+import { randomUUID } from "node:crypto";
+import { logError } from "../utils/logger.js";
+import { hasValidFileSignature } from "../utils/fileValidation.js";
 import Note from "../models/Note.js";
 
 const getNoteFilesBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
     bucketName: "noteFiles",
   });
+
+export const getNoteStats = async (_req, res) => {
+  try {
+    const [total, universities, studyTypes] = await Promise.all([
+      Note.countDocuments(),
+      Note.distinct("university"),
+      Note.distinct("studyType"),
+    ]);
+
+    res.json({
+      success: true,
+      stats: {
+        total,
+        universities: universities.filter((value) => typeof value === "string" && value.trim()).length,
+        studyTypes: studyTypes.filter((value) => typeof value === "string" && value.trim()).length,
+      },
+    });
+  } catch {
+    logError("notes.stats_failed");
+    res.status(500).json({ message: "Could not load note statistics" });
+  }
+};
 
 /**
  * Upload note (multipart/form-data with "file" field)
@@ -18,10 +43,15 @@ export const uploadNote = async (req, res) => {
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ message: "No file uploaded" });
+    if (!hasValidFileSignature(file)) {
+      return res.status(400).json({ message: "File contents do not match a supported file type" });
+    }
 
-    const safeName = file.originalname.split(/[\\/]/).pop() || "upload";
+    const safeName = (file.originalname.split(/[\\/]/).pop() || "upload")
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .slice(0, 200) || "upload";
     bucket = getNoteFilesBucket();
-    const uploadStream = bucket.openUploadStream(safeName, {
+    const uploadStream = bucket.openUploadStream(`${randomUUID()}`, {
       metadata: { contentType: file.mimetype },
     });
     fileId = uploadStream.id;
@@ -50,13 +80,15 @@ export const uploadNote = async (req, res) => {
     });
 
     const fileUrl = `/api/notes/${note.id}/file`;
-    res.status(201).json({ success: true, message: "Note uploaded", url: fileUrl, fileUrl, note });
-  } catch (err) {
+    res.status(201).json({ success: true, message: "Note uploaded", url: fileUrl, fileUrl });
+  } catch {
     if (bucket && fileId) {
-      await bucket.delete(fileId).catch(() => { });
+      await bucket.delete(fileId).catch(() => {
+        logError("notes.upload_cleanup_failed");
+      });
     }
-    console.error("Upload note error:", err);
-    res.status(500).json({ message: "Upload failed", error: err.message });
+    logError("notes.upload_failed");
+    res.status(500).json({ message: "Upload failed" });
   }
 };
 
@@ -68,14 +100,11 @@ export const listNotes = async (req, res) => {
 
     res.json({
       success: true,
-      notes: notes.map((note) => ({
-        ...note.toObject(),
-        fileUrl: `/api/notes/${note.id}/file`,
-      })),
+      notes: notes.map((note) => serializeNote(note)),
     });
-  } catch (err) {
-    console.error("List notes error:", err);
-    res.status(500).json({ message: "Could not load notes", error: err.message });
+  } catch {
+    logError("notes.list_failed");
+    res.status(500).json({ message: "Could not load notes" });
   }
 };
 
@@ -87,14 +116,11 @@ export const listMyNotes = async (req, res) => {
 
     res.json({
       success: true,
-      notes: notes.map((note) => ({
-        ...note.toObject(),
-        fileUrl: `/api/notes/${note.id}/file`,
-      })),
+      notes: notes.map((note) => serializeNote(note)),
     });
-  } catch (err) {
-    console.error("List user notes error:", err);
-    res.status(500).json({ message: "Could not load your notes", error: err.message });
+  } catch {
+    logError("notes.user_list_failed");
+    res.status(500).json({ message: "Could not load your notes" });
   }
 };
 
@@ -117,8 +143,8 @@ export const deleteMyNote = async (req, res) => {
     await note.deleteOne();
 
     return res.json({ success: true, message: "Note deleted successfully" });
-  } catch (err) {
-    console.error("Delete note error:", err);
+  } catch {
+    logError("notes.delete_failed");
     return res.status(500).json({ message: "Could not delete note" });
   }
 };
@@ -140,16 +166,32 @@ export const downloadNoteFile = async (req, res) => {
       "Content-Disposition",
       `attachment; filename*=UTF-8''${encodeURIComponent(note.fileName || "download")}`
     );
-    downloadStream.on("error", (err) => {
+    downloadStream.on("error", () => {
       if (res.headersSent) {
-        res.destroy(err);
+        logError("notes.download_stream_failed");
+        res.destroy();
       } else {
         res.status(404).json({ message: "Note file not found" });
       }
     });
     downloadStream.pipe(res);
-  } catch (err) {
-    console.error("Download note error:", err);
-    res.status(500).json({ message: "Download failed", error: err.message });
+  } catch {
+    logError("notes.download_failed");
+    res.status(500).json({ message: "Download failed" });
   }
 };
+
+const serializeNote = (note) => ({
+  _id: note.id,
+  title: note.title,
+  description: note.description,
+  fileName: note.fileName,
+  fileSize: note.fileSize,
+  university: note.university,
+  course: note.course,
+  studyType: note.studyType,
+  year: note.year,
+  tags: note.tags,
+  createdAt: note.createdAt,
+  fileUrl: `/api/notes/${note.id}/file`,
+});

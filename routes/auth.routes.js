@@ -10,7 +10,7 @@ import {
   verifyUser,
   updateProfile,
   updateProfilePhoto,
-  forgotPassword,
+  changePassword,
 } from "../controllers/auth.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
 
@@ -23,10 +23,22 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { message: "Too many failed login attempts. Please try again in 15 minutes." },
 });
+const passwordChangeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many password change attempts. Please try again later." },
+});
 const allowedPhotoTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 const profilePhotoUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    fieldSize: 64 * 1024,
+    fields: 8,
+    parts: 9,
+  },
   fileFilter: (_req, file, callback) => {
     if (allowedPhotoTypes.has(file.mimetype)) return callback(null, true);
     callback(new Error("Use a JPEG, PNG, or WebP image"));
@@ -36,8 +48,15 @@ const profilePhotoUpload = multer({
 const parseProfilePhoto = (req, res, next) => {
   profilePhotoUpload.single("photo")(req, res, (error) => {
     if (!error) return next();
-    const status = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
-    res.status(status).json({ message: error.message });
+    const status =
+      error.code === "LIMIT_FILE_SIZE" || error.code === "LIMIT_FIELD_VALUE" ? 413 : 400;
+    res.status(status).json({
+      message: error.code === "LIMIT_FILE_SIZE"
+        ? "Profile photo exceeds the 5 MB limit"
+        : status === 413
+          ? "Profile photo request is too large"
+          : "Could not process profile photo upload",
+    });
   });
 };
 
@@ -45,7 +64,7 @@ const parseProfilePhoto = (req, res, next) => {
 const registerValidation = [
   body("name").notEmpty().withMessage("Name is required"),
   body("email").isEmail().withMessage("Invalid email format"),
-  body("password").isLength({ min: 6 }).withMessage("Password must be at least 6 characters long"),
+  body("password").isLength({ min: 8 }).withMessage("Password must be at least 8 characters long"),
   body("university").notEmpty().withMessage("University is required"),
   body("course").notEmpty().withMessage("Course is required"),
   body("year").notEmpty().withMessage("Year is required"),
@@ -55,6 +74,11 @@ const registerValidation = [
 const loginValidation = [
   body("email").isEmail().withMessage("Invalid email format"),
   body("password").notEmpty().withMessage("Password is required"),
+];
+
+const passwordChangeValidation = [
+  body("currentPassword").notEmpty().withMessage("Current password is required"),
+  body("newPassword").isLength({ min: 8 }).withMessage("Password must be at least 8 characters long"),
 ];
 
 const profileValidation = [
@@ -69,7 +93,9 @@ const profileValidation = [
 const handleValidationErrors = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
+    return res.status(400).json({
+      errors: errors.array().map(({ path, msg }) => ({ field: path, message: msg })),
+    });
   }
   next();
 };
@@ -81,6 +107,13 @@ router.get("/verify", protect, verifyUser);
 router.get("/profile/photo", protect, getProfilePhoto);
 router.put("/profile", protect, parseProfilePhoto, profileValidation, handleValidationErrors, updateProfile);
 router.put("/profile/photo", protect, parseProfilePhoto, updateProfilePhoto);
-router.post("/forgot-password", forgotPassword);
+router.post(
+  "/change-password",
+  protect,
+  passwordChangeLimiter,
+  passwordChangeValidation,
+  handleValidationErrors,
+  changePassword
+);
 
 export default router;

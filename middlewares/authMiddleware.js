@@ -2,15 +2,16 @@ import jwt from "jsonwebtoken";
 import { AUTH_SESSION_SECONDS } from "../config/auth.js";
 
 export const protect = (req, res, next) => {
-  console.log("Request cookies:", req.cookies);
-  const token = req.cookies.token;
+  const token = req.cookies?.token;
 
   if (!token) {
     return res.status(401).json({ message: "Unauthorized: No token provided" });
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+      algorithms: ["HS256"],
+    });
     if (
       typeof decoded === "string" ||
       typeof decoded.iat !== "number" ||

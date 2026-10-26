@@ -1,6 +1,6 @@
 # Node.js
 node_modules/
-.env
+.env*
 
 # Logs
 *.log
@@ -14,4 +14,3 @@ dist/
 
 # Test files
 test.pdf
-
