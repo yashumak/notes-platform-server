@@ -5,6 +5,8 @@ import jwt from "jsonwebtoken";
 import { AUTH_SESSION_SECONDS } from "../config/auth.js";
 import { logError } from "../utils/logger.js";
 import { hasValidFileSignature } from "../utils/fileValidation.js";
+import { setGridFsFileUserId } from "../utils/gridFsOwnership.js";
+import { ensureUserId, generateUserId } from "../utils/userId.js";
 
 const BCRYPT_ROUNDS = 12;
 
@@ -29,17 +31,28 @@ export const registerUser = async (req, res) => {
     if (userExists) return res.status(400).json({ message: "User already exists" });
 
     const hashed = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    let user;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        user = await User.create({
+          user_id: generateUserId(),
+          name,
+          email,
+          password: hashed,
+          university,
+          course,
+          year
+        });
+        break;
+      } catch (error) {
+        const duplicateUserId =
+          error.code === 11000 &&
+          (error.keyPattern?.user_id || error.keyValue?.user_id !== undefined);
+        if (!duplicateUserId || attempt === 4) throw error;
+      }
+    }
 
-    const user = await User.create({
-      name,
-      email,
-      password: hashed,
-      university,
-      course,
-      year
-    });
-
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: user._id, user_id: user.user_id }, process.env.JWT_SECRET, {
       expiresIn: AUTH_SESSION_SECONDS,
       algorithm: "HS256",
     });
@@ -65,7 +78,8 @@ export const loginUser = async (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ message: "Invalid email or password" });
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+    const userId = await ensureUserId(user);
+    const token = jwt.sign({ id: user._id, user_id: userId }, process.env.JWT_SECRET, {
       expiresIn: AUTH_SESSION_SECONDS,
       algorithm: "HS256",
     });
@@ -161,6 +175,7 @@ export const updateProfile = async (req, res) => {
       if (!hasValidFileSignature(req.file)) {
         return res.status(400).json({ message: "Profile photo contents are invalid" });
       }
+      const userId = await ensureUserId(user);
       bucket = getProfilePhotosBucket();
       const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
         metadata: { contentType: req.file.mimetype },
@@ -172,6 +187,7 @@ export const updateProfile = async (req, res) => {
         uploadStream.once("error", reject);
         uploadStream.end(req.file.buffer);
       });
+      await setGridFsFileUserId("profilePhotos", newFileId, userId);
     }
 
     user.name = name;
@@ -239,6 +255,7 @@ export const updateProfilePhoto = async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     bucket = getProfilePhotosBucket();
+    const userId = await ensureUserId(user);
     const oldFileId = user.profilePhotoFileId;
     const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
       metadata: { contentType: req.file.mimetype },
@@ -250,6 +267,7 @@ export const updateProfilePhoto = async (req, res) => {
       uploadStream.once("error", reject);
       uploadStream.end(req.file.buffer);
     });
+    await setGridFsFileUserId("profilePhotos", newFileId, userId);
 
     user.profilePhotoFileId = newFileId;
     user.profilePhotoContentType = req.file.mimetype;

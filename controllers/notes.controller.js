@@ -4,6 +4,9 @@ import { randomUUID } from "node:crypto";
 import { logError } from "../utils/logger.js";
 import { hasValidFileSignature } from "../utils/fileValidation.js";
 import Note from "../models/Note.js";
+import User from "../models/User.js";
+import { setGridFsFileUserId } from "../utils/gridFsOwnership.js";
+import { ensureUserId } from "../utils/userId.js";
 
 const getNoteFilesBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
@@ -50,6 +53,9 @@ export const uploadNote = async (req, res) => {
     const safeName = (file.originalname.split(/[\\/]/).pop() || "upload")
       .replace(/[\u0000-\u001f\u007f]/g, "")
       .slice(0, 200) || "upload";
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(401).json({ message: "User not found" });
+    const userId = await ensureUserId(user);
     bucket = getNoteFilesBucket();
     const uploadStream = bucket.openUploadStream(`${randomUUID()}`, {
       metadata: { contentType: file.mimetype },
@@ -61,6 +67,7 @@ export const uploadNote = async (req, res) => {
       uploadStream.once("error", reject);
       uploadStream.end(file.buffer);
     });
+    await setGridFsFileUserId("noteFiles", fileId, userId);
 
     const { title, description, university, course, studyType, year, tags } = req.body;
 
@@ -75,7 +82,8 @@ export const uploadNote = async (req, res) => {
       course: course || req.body.branch,
       studyType,
       year: year ? Number(year) : undefined,
-      uploadedBy: req.user.id,
+      user_id: userId,
+      uploadedBy: user._id,
       tags: tags ? (Array.isArray(tags) ? tags : String(tags).split(",").map((tag) => tag.trim())) : [],
     });
 
