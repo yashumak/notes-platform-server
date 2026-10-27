@@ -1,6 +1,7 @@
 # Node.js
 node_modules/
 .env
+myenv/
 
 # Logs
 *.log
@@ -12,6 +13,9 @@ yarn-error.log*
 build/
 dist/
 
-# Test files
-test.pdf
-
+# Python / Scraper
+scraper/myenv/
+scraper/downloaded_pdfs/
+downloaded_pdfs/
+__pycache__/
+*.pyc
