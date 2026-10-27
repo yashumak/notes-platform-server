@@ -10,6 +10,7 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { logError, logInfo } from "./utils/logger.js";
+import { isPublicNotesReadRequest } from "./utils/rateLimitPolicy.js";
 
 // Routes
 import authRoutes from "./routes/auth.routes.js";
@@ -46,6 +47,7 @@ app.use(helmet());
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 1000,
+  skip: isPublicNotesReadRequest,
   standardHeaders: true,
   legacyHeaders: false,
   message: "Too many requests from this IP, please try again later",
