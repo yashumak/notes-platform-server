@@ -2,6 +2,13 @@ import User from "../models/User.js";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { AUTH_SESSION_SECONDS } from "../config/auth.js";
+import { logError } from "../utils/logger.js";
+import { hasValidFileSignature } from "../utils/fileValidation.js";
+import { setGridFsFileUserId } from "../utils/gridFsOwnership.js";
+import { ensureUserId, generateUserId } from "../utils/userId.js";
+
+const BCRYPT_ROUNDS = 12;
 
 const getProfilePhotosBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
@@ -23,27 +30,39 @@ export const registerUser = async (req, res) => {
     const userExists = await User.findOne({ email });
     if (userExists) return res.status(400).json({ message: "User already exists" });
 
-    const hashed = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    let user;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        user = await User.create({
+          user_id: generateUserId(),
+          name,
+          email,
+          password: hashed,
+          university,
+          course,
+          year
+        });
+        break;
+      } catch (error) {
+        const duplicateUserId =
+          error.code === 11000 &&
+          (error.keyPattern?.user_id || error.keyValue?.user_id !== undefined);
+        if (!duplicateUserId || attempt === 4) throw error;
+      }
+    }
 
-    const user = await User.create({
-      name,
-      email,
-      password: hashed,
-      university,
-      course,
-      year
-    });
-
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
+    const token = jwt.sign({ id: user._id, user_id: user.user_id }, process.env.JWT_SECRET, {
+      expiresIn: AUTH_SESSION_SECONDS,
+      algorithm: "HS256",
     });
 
     res.cookie("token", token, {
       ...authCookieOptions,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: AUTH_SESSION_SECONDS * 1000,
     }).status(201).json({ message: "Registration successful" });
-  } catch (error) {
-    console.error("Registration error in auth.controller.js:", error.stack || error);
+  } catch {
+    logError("auth.registration_failed");
     res.status(500).json({ message: "Internal server error" });
   }
 };
@@ -53,22 +72,24 @@ export const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
-    if (!user) return res.status(404).json({ message: "User not found" });
+    const user = await User.findOne({ email }).select("+password");
+    if (!user) return res.status(401).json({ message: "Invalid email or password" });
 
     const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(400).json({ message: "Incorrect password" });
+    if (!match) return res.status(401).json({ message: "Invalid email or password" });
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
+    const userId = await ensureUserId(user);
+    const token = jwt.sign({ id: user._id, user_id: userId }, process.env.JWT_SECRET, {
+      expiresIn: AUTH_SESSION_SECONDS,
+      algorithm: "HS256",
     });
 
     res.cookie("token", token, {
       ...authCookieOptions,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: AUTH_SESSION_SECONDS * 1000,
     }).json({ message: "Login successful" });
-  } catch (error) {
-    console.error("Login error in auth.controller.js:", error);
+  } catch {
+    logError("auth.login_failed");
     res.status(500).json({ message: "Internal server error" });
   }
 };
@@ -82,6 +103,10 @@ export const logoutUser = (req, res) => {
 
 // Verify the session and return the minimal user details needed by the UI.
 export const verifyUser = async (req, res) => {
+  const expiresAt = Math.min(
+    req.user.exp,
+    req.user.iat + AUTH_SESSION_SECONDS
+  ) * 1000;
   const user = await User.findById(req.user.id).select(
     "name email university course year profilePhotoFileId"
   );
@@ -92,8 +117,8 @@ export const verifyUser = async (req, res) => {
 
   res.json({
     isAuthenticated: true,
+    expiresAt,
     user: {
-      id: user.id,
       name: user.name,
       email: user.email,
       university: user.university,
@@ -116,17 +141,96 @@ export const getProfilePhoto = async (req, res) => {
     const downloadStream = getProfilePhotosBucket().openDownloadStream(user.profilePhotoFileId);
     res.setHeader("Content-Type", user.profilePhotoContentType || "application/octet-stream");
     res.setHeader("Cache-Control", "private, no-cache");
-    downloadStream.on("error", (error) => {
+    downloadStream.on("error", () => {
       if (res.headersSent) {
-        res.destroy(error);
+        logError("profile_photo.download_stream_failed");
+        res.destroy();
       } else {
         res.status(404).json({ message: "Profile photo not found" });
       }
     });
     downloadStream.pipe(res);
   } catch (error) {
-    console.error("Get profile photo error:", error);
+    logError("profile_photo.load_failed");
     res.status(500).json({ message: "Could not load profile photo" });
+  }
+};
+
+export const updateProfile = async (req, res) => {
+  let bucket;
+  let newFileId;
+
+  try {
+    const { name, email, university, course, year } = req.body;
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const existingUser = await User.findOne({ email, _id: { $ne: user._id } });
+    if (existingUser) {
+      return res.status(409).json({ message: "An account with this email already exists" });
+    }
+
+    const oldFileId = user.profilePhotoFileId;
+    if (req.file) {
+      if (!hasValidFileSignature(req.file)) {
+        return res.status(400).json({ message: "Profile photo contents are invalid" });
+      }
+      const userId = await ensureUserId(user);
+      bucket = getProfilePhotosBucket();
+      const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
+        metadata: { contentType: req.file.mimetype },
+      });
+      newFileId = uploadStream.id;
+
+      await new Promise((resolve, reject) => {
+        uploadStream.once("finish", resolve);
+        uploadStream.once("error", reject);
+        uploadStream.end(req.file.buffer);
+      });
+      await setGridFsFileUserId("profilePhotos", newFileId, userId);
+    }
+
+    user.name = name;
+    user.email = email;
+    user.university = university;
+    user.course = course;
+    user.year = year;
+    if (req.file && newFileId) {
+      user.profilePhotoFileId = newFileId;
+      user.profilePhotoContentType = req.file.mimetype;
+    }
+    await user.save();
+
+    if (req.file && oldFileId && bucket) {
+      await bucket.delete(oldFileId).catch(() => {
+        logError("profile_photo.previous_file_cleanup_failed");
+      });
+    }
+
+    return res.json({
+      success: true,
+      user: {
+        name: user.name,
+        email: user.email,
+        university: user.university,
+        course: user.course,
+        year: user.year,
+        profilePhotoUrl: user.profilePhotoFileId
+          ? `/api/auth/profile/photo?v=${user.profilePhotoFileId}`
+          : null,
+      },
+    });
+  } catch (error) {
+    if (bucket && newFileId) {
+      await bucket.delete(newFileId).catch(() => {
+        logError("profile_photo.incomplete_file_cleanup_failed");
+      });
+    }
+    if (error.code === 11000) {
+      return res.status(409).json({ message: "An account with this email already exists" });
+    }
+    logError("profile.update_failed");
+    return res.status(500).json({ message: "Could not update your profile" });
   }
 };
 
@@ -139,6 +243,9 @@ export const updateProfilePhoto = async (req, res) => {
   if (!allowedTypes.has(req.file.mimetype)) {
     return res.status(400).json({ message: "Use a JPEG, PNG, or WebP image" });
   }
+  if (!hasValidFileSignature(req.file)) {
+    return res.status(400).json({ message: "Profile photo contents are invalid" });
+  }
 
   let bucket;
   let newFileId;
@@ -148,6 +255,7 @@ export const updateProfilePhoto = async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
 
     bucket = getProfilePhotosBucket();
+    const userId = await ensureUserId(user);
     const oldFileId = user.profilePhotoFileId;
     const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
       metadata: { contentType: req.file.mimetype },
@@ -159,51 +267,62 @@ export const updateProfilePhoto = async (req, res) => {
       uploadStream.once("error", reject);
       uploadStream.end(req.file.buffer);
     });
+    await setGridFsFileUserId("profilePhotos", newFileId, userId);
 
     user.profilePhotoFileId = newFileId;
     user.profilePhotoContentType = req.file.mimetype;
     await user.save();
 
-    if (oldFileId) await bucket.delete(oldFileId).catch(() => { });
+    if (oldFileId) {
+      await bucket.delete(oldFileId).catch(() => {
+        logError("profile_photo.previous_file_cleanup_failed");
+      });
+    }
 
     res.json({
       success: true,
       profilePhotoUrl: `/api/auth/profile/photo?v=${newFileId}`,
     });
   } catch (error) {
-    if (bucket && newFileId) await bucket.delete(newFileId).catch(() => { });
-    console.error("Update profile photo error:", error);
+    if (bucket && newFileId) {
+      await bucket.delete(newFileId).catch(() => {
+        logError("profile_photo.incomplete_file_cleanup_failed");
+      });
+    }
+    logError("profile_photo.update_failed");
     res.status(500).json({ message: "Could not update profile photo" });
   }
 };
 
-// Forgot Password
-export const forgotPassword = async (req, res) => {
+export const changePassword = async (req, res) => {
   try {
     const body = req.body ?? {};
-    const email = typeof body.email === "string" ? body.email.trim() : "";
+    const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
     const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
 
-    if (!email || !newPassword) {
-      return res.status(400).json({ message: "Email and new password are required." });
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: "Current and new passwords are required." });
     }
-    if (newPassword.length < 6) {
-      return res.status(400).json({ message: "Password must be at least 6 characters." });
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: "Password must be at least 8 characters." });
     }
 
-    const user = await User.findOne({ email });
-    if (!user) return res.status(404).json({ message: "User not found." });
+    const user = await User.findById(req.user.id).select("+password");
+    if (!user || !(await bcrypt.compare(currentPassword, user.password))) {
+      return res.status(401).json({ message: "Current password is incorrect." });
+    }
 
     if (await bcrypt.compare(newPassword, user.password)) {
-      return res.status(400).json({ message: "Your new password must be different from your current password." });
+      return res.status(400).json({ message: "Choose a password different from your current password." });
     }
 
-    user.password = await bcrypt.hash(newPassword, 10);
+    user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await user.save();
 
-    return res.json({ message: "Password updated successfully. Please login with your new password." });
-  } catch (error) {
-    console.error("Forgot password error:", error);
+    res.clearCookie("token", authCookieOptions);
+    return res.json({ message: "Password updated. Please log in again." });
+  } catch {
+    logError("auth.password_change_failed");
     return res.status(500).json({ message: "Could not update your password." });
   }
 };

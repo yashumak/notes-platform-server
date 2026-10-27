@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 
 const noteSchema = new mongoose.Schema(
   {
+    user_id: { type: String, match: /^\d{10}$/ },
     title: { type: String, required: true },
     description: { type: String },
     fileId: { type: mongoose.Schema.Types.ObjectId, required: true },
@@ -15,6 +16,8 @@ const noteSchema = new mongoose.Schema(
     uploadedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
+      required: true,
+      index: true,
     },
     tags: [{ type: String }],
   },

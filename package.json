@@ -6,7 +6,8 @@
     "build": "node index.js",
     "dev": "nodemon index.js",
     "start": "node index.js",
-    "test": "jest"
+    "test": "node --test test/security.test.js",
+    "test:security": "node --test test/security.test.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
