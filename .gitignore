@@ -1,21 +1,82 @@
 # Node.js
 node_modules/
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.*.sample
+!.env.template
+!.env.*.template
 myenv/
+venv/
+.venv/
 
 # Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.pnpm-debug.log*
 
 # Build artifacts
 build/
 dist/
+coverage/
+*.tsbuildinfo
 
 # Python / Scraper
 scraper/myenv/
+scraper/venv/
+scraper/.venv/
 scraper/downloaded_pdfs/
 downloaded_pdfs/
 __pycache__/
-*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.py[cod]
+
+# Private keys and local credential bundles
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+
+# Local editor state; keep shareable VS Code settings and tasks
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/workspace.xml
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/shelf/
+.idea/**/httpRequests/
+
+# Temporary and OS files
+.cache/
+.npm/
+tmp/
+temp/
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.directory
+*.swp
+*.swo
+*~
+
+# Scraper test/runtime files
+test.pdf
+uploaded_pdfs/
