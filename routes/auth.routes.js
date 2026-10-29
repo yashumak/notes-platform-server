@@ -13,6 +13,7 @@ import {
   changePassword,
 } from "../controllers/auth.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
+import { decryptAuthPayload, getAuthPayloadPublicKey } from "../utils/authPayloadEncryption.js";
 
 const router = express.Router();
 const loginLimiter = rateLimit({
@@ -100,8 +101,12 @@ const handleValidationErrors = (req, res, next) => {
   next();
 };
 
-router.post("/register", registerValidation, handleValidationErrors, registerUser);
-router.post("/login", loginLimiter, loginValidation, handleValidationErrors, loginUser);
+router.get("/encryption-key", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ publicKey: getAuthPayloadPublicKey() });
+});
+router.post("/register", decryptAuthPayload, registerValidation, handleValidationErrors, registerUser);
+router.post("/login", loginLimiter, decryptAuthPayload, loginValidation, handleValidationErrors, loginUser);
 router.post("/logout", logoutUser);
 router.get("/verify", protect, verifyUser);
 router.get("/profile/photo", protect, getProfilePhoto);

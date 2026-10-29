@@ -90,3 +90,20 @@ They are hashed before storage, are not returned in API responses, and must
 never be logged. Users can still inspect their own request payloads in browser
 Developer Tools; HTTPS protects credentials in transit but cannot hide a
 request from the browser that created it.
+
+Registration and login request bodies are additionally encrypted in the browser
+using an ephemeral AES-256-GCM key wrapped with the backend's RSA-OAEP public
+key. This makes the Network panel show ciphertext instead of the submitted
+credentials and registration details. It does not hide values from the browser
+or replace HTTPS. The backend decrypts these requests before validation and
+authentication; uploaded notes are not encrypted by this feature.
+
+In production, set `AUTH_ENCRYPTION_PRIVATE_KEY` to a PEM-encoded RSA private
+key (PKCS#8, 2048 bits or larger). To generate one, run:
+
+```bash
+node --input-type=module -e "import { generateKeyPairSync } from 'node:crypto'; const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }); console.log(privateKey.replace(/\n/g, '\\n'))"
+```
+
+Store the output as a private deployment secret. Do not commit the key. Local
+development automatically uses an ephemeral key pair.

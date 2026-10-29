@@ -4,7 +4,12 @@ import { EventEmitter } from "node:events";
 import express from "express";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
-import { randomBytes } from "node:crypto";
+import {
+  constants,
+  createCipheriv,
+  publicEncrypt,
+  randomBytes,
+} from "node:crypto";
 import test from "node:test";
 import authRoutes from "../routes/auth.routes.js";
 import notesRoutes from "../routes/notes.routes.js";
@@ -24,6 +29,109 @@ import Note from "../models/Note.js";
 import User from "../models/User.js";
 import { ensureUserId, generateUserId } from "../utils/userId.js";
 import { isPublicNotesReadRequest } from "../utils/rateLimitPolicy.js";
+import { decryptAuthPayload, getAuthPayloadPublicKey } from "../utils/authPayloadEncryption.js";
+
+const encryptAuthPayloadForTest = (payload) => {
+  const aesKey = randomBytes(32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", aesKey, iv);
+  const encryptedData = Buffer.concat([
+    cipher.update(JSON.stringify(payload), "utf8"),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+  const encryptedKey = publicEncrypt(
+    {
+      key: getAuthPayloadPublicKey(),
+      padding: constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: "sha256",
+    },
+    aesKey
+  );
+
+  return {
+    encryptedKey: encryptedKey.toString("base64"),
+    iv: iv.toString("base64"),
+    encryptedData: encryptedData.toString("base64"),
+  };
+};
+
+test("encrypted auth requests decrypt to the original user fields", () => {
+  const payload = {
+    email: "private@example.com",
+    password: "safe-test-password",
+    name: "Test User",
+  };
+  const req = { body: encryptAuthPayloadForTest(payload) };
+  let continued = false;
+  let responseStatus;
+  let responseBody;
+
+  decryptAuthPayload(
+    req,
+    {
+      status(status) {
+        responseStatus = status;
+        return this;
+      },
+      json(body) {
+        responseBody = body;
+        return this;
+      },
+    },
+    () => { continued = true; }
+  );
+
+  assert.equal(continued, true);
+  assert.deepEqual(req.body, payload);
+  assert.equal(responseStatus, undefined);
+  assert.equal(responseBody, undefined);
+});
+
+test("invalid encrypted auth requests are rejected without exposing details", () => {
+  let responseStatus;
+  let responseBody;
+
+  decryptAuthPayload(
+    { body: { encryptedKey: "invalid", iv: "invalid", encryptedData: "invalid" } },
+    {
+      status(status) {
+        responseStatus = status;
+        return this;
+      },
+      json(body) {
+        responseBody = body;
+        return this;
+      },
+    },
+    () => assert.fail("next should not run for invalid encrypted requests")
+  );
+
+  assert.equal(responseStatus, 400);
+  assert.deepEqual(responseBody, { message: "Encrypted request payload is invalid" });
+});
+
+test("encrypted auth requests reject additional plaintext fields", () => {
+  const encryptedPayload = encryptAuthPayloadForTest({
+    email: "private@example.com",
+    password: "safe-test-password",
+  });
+  let responseStatus;
+
+  decryptAuthPayload(
+    { body: { ...encryptedPayload, password: "plaintext-password" } },
+    {
+      status(status) {
+        responseStatus = status;
+        return this;
+      },
+      json() { return this; },
+    },
+    () => assert.fail("next should not run when plaintext fields are present")
+  );
+
+  assert.equal(responseStatus, 400);
+});
 
 test("password hashes are excluded from normal user queries", () => {
   assert.equal(User.schema.path("password").options.select, false);

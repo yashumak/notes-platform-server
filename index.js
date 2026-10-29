@@ -11,6 +11,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { logError, logInfo } from "./utils/logger.js";
 import { isPublicNotesReadRequest } from "./utils/rateLimitPolicy.js";
+import { initializeAuthPayloadEncryption } from "./utils/authPayloadEncryption.js";
 
 // Routes
 import authRoutes from "./routes/auth.routes.js";
@@ -24,6 +25,13 @@ const PORT = process.env.PORT || 5000;
 
 if (!process.env.JWT_SECRET || Buffer.byteLength(process.env.JWT_SECRET) < 32) {
   logError("startup.jwt_secret_missing_or_weak");
+  process.exit(1);
+}
+
+try {
+  initializeAuthPayloadEncryption();
+} catch {
+  logError("startup.auth_encryption_key_invalid_or_missing");
   process.exit(1);
 }
 
