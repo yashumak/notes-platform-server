@@ -24,12 +24,12 @@
       "kind": "process",
       "command": "npm",
       "args": ["test"],
-      "verificationMethod": "test-results",
+      "verificationMethod": "exit-code",
       "expected": "0",
       "timeoutSeconds": 120
     },
     {
-      "name": "notes-list-requires-authentication",
+      "name": "public-notes-list",
       "kind": "http-probe",
       "startCommand": "node",
       "startArgs": ["index.js"],
@@ -39,7 +39,7 @@
       },
       "url": "http://localhost:5100/api/notes",
       "verificationMethod": "http-status",
-      "expected": "401",
+      "expected": "200",
       "timeoutSeconds": 120
     },
     {

@@ -1,32 +1,123 @@
 // controllers/notes.controller.js
 import mongoose from "mongoose";
 import { randomUUID } from "node:crypto";
+import jwt from "jsonwebtoken";
 import { logError } from "../utils/logger.js";
-import { hasValidFileSignature } from "../utils/fileValidation.js";
+import {
+  getMaxNoteFileSizeBytes,
+  sanitizeFileName,
+  validateFileMetadata,
+} from "../utils/fileValidation.js";
+import { s3Storage, UPLOAD_URL_TTL_SECONDS } from "../services/s3Storage.js";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
-import { setGridFsFileUserId } from "../utils/gridFsOwnership.js";
-import { ensureUserId } from "../utils/userId.js";
 
 const getNoteFilesBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
     bucketName: "noteFiles",
   });
 
+const UPLOAD_TOKEN_TTL_SECONDS = 15 * 60;
+const UPLOAD_TOKEN_ISSUER = "noteshub-s3-upload";
+const UPLOAD_TOKEN_AUDIENCE = "noteshub-s3-upload";
+const NOTE_RECORD_ID_PATTERN =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[a-z0-9-]{1,220})$/i;
+
+const cleanText = (value, maxLength) =>
+  typeof value === "string" ? value.trim().replace(/[\u0000-\u001f\u007f]/g, "").slice(0, maxLength) : "";
+
+const toS3PathSegment = (value, fallback, maxLength) => {
+  const segment = String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength)
+    .replace(/-+$/g, "");
+  return segment || fallback;
+};
+
+const makeUploadMetadata = (body, safeName) => {
+  const visibility = body.visibility === undefined ? "public" : body.visibility;
+  if (visibility !== "public" && visibility !== "private") return null;
+  const year = body.year === "" || body.year === undefined ? undefined : Number(body.year);
+  if (year !== undefined && (!Number.isInteger(year) || year < 1900 || year > 2100)) {
+    return null;
+  }
+  const tags = Array.isArray(body.tags)
+    ? body.tags
+        .filter((tag) => typeof tag === "string")
+        .slice(0, 20)
+        .map((tag) => cleanText(tag, 50))
+        .filter(Boolean)
+    : [];
+  return {
+    title: cleanText(body.title, 200) || safeName,
+    description: cleanText(body.description, 2000),
+    university: cleanText(body.university, 200),
+    course: cleanText(body.course || body.branch, 200),
+    subject: cleanText(body.subject, 200),
+    category: cleanText(body.category || body.studyType, 100),
+    studyType: cleanText(body.studyType, 100),
+    visibility,
+    year,
+    tags,
+  };
+};
+
+const verifyUploadToken = (token, userId) => {
+  try {
+    const claims = jwt.verify(token, process.env.JWT_SECRET, {
+      algorithms: ["HS256"],
+      issuer: UPLOAD_TOKEN_ISSUER,
+      audience: UPLOAD_TOKEN_AUDIENCE,
+    });
+    if (
+      typeof claims === "string" ||
+      claims.sub !== String(userId) ||
+      typeof claims.key !== "string" ||
+      typeof claims.noteId !== "string" ||
+      !NOTE_RECORD_ID_PATTERN.test(claims.noteId) ||
+      !/^notes\/[a-z0-9-]+\/[a-z0-9-]+$/i.test(claims.key)
+    ) {
+      return null;
+    }
+    return claims;
+  } catch {
+    return null;
+  }
+};
+
+const isStorageConfigurationError = (error) => error?.code === "S3_CONFIGURATION_MISSING";
+
 export const getNoteStats = async (_req, res) => {
   try {
-    const [total, universities, studyTypes] = await Promise.all([
-      Note.countDocuments(),
-      Note.distinct("university"),
-      Note.distinct("studyType"),
+    const s3Notes = (await s3Storage.listNoteRecords()).filter(
+      (note) => note.visibility !== "private" && note.uploadStatus !== "deleting"
+    );
+    const sharedNotes = {
+      visibility: { $ne: "private" },
+      uploadStatus: { $ne: "deleting" },
+    };
+    const [legacyTotal, universities, studyTypes] = await Promise.all([
+      Note.countDocuments(sharedNotes),
+      Note.distinct("university", sharedNotes),
+      Note.distinct("studyType", sharedNotes),
     ]);
 
     res.json({
       success: true,
       stats: {
-        total,
-        universities: universities.filter((value) => typeof value === "string" && value.trim()).length,
-        studyTypes: studyTypes.filter((value) => typeof value === "string" && value.trim()).length,
+        total: legacyTotal + s3Notes.length,
+        universities: new Set([
+          ...universities.filter((value) => typeof value === "string" && value.trim()),
+          ...s3Notes.map((note) => note.university).filter((value) => typeof value === "string" && value.trim()),
+        ]).size,
+        studyTypes: new Set([
+          ...studyTypes.filter((value) => typeof value === "string" && value.trim()),
+          ...s3Notes.map((note) => note.studyType).filter((value) => typeof value === "string" && value.trim()),
+        ]).size,
       },
     });
   } catch {
@@ -35,76 +126,183 @@ export const getNoteStats = async (_req, res) => {
   }
 };
 
-/**
- * Upload note (multipart/form-data with "file" field)
- * Expects auth middleware to set req.user.id
- */
-export const uploadNote = async (req, res) => {
-  let bucket;
-  let fileId;
-
+export const createNoteUploadUrl = async (req, res) => {
   try {
-    const file = req.file;
-    if (!file) return res.status(400).json({ message: "No file uploaded" });
-    if (!hasValidFileSignature(file)) {
-      return res.status(400).json({ message: "File contents do not match a supported file type" });
+    const body = req.body || {};
+    const file = validateFileMetadata({
+      fileName: body.fileName,
+      contentType: body.contentType,
+      fileSize: body.fileSize,
+    });
+    if (!file.valid) {
+      return res.status(file.tooLarge ? 413 : 400).json({ message: file.message });
     }
 
-    const safeName = (file.originalname.split(/[\\/]/).pop() || "upload")
-      .replace(/[\u0000-\u001f\u007f]/g, "")
-      .slice(0, 200) || "upload";
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(401).json({ message: "User not found" });
-    const userId = await ensureUserId(user);
-    bucket = getNoteFilesBucket();
-    const uploadStream = bucket.openUploadStream(`${randomUUID()}`, {
-      metadata: { contentType: file.mimetype },
-    });
-    fileId = uploadStream.id;
-
-    await new Promise((resolve, reject) => {
-      uploadStream.once("finish", resolve);
-      uploadStream.once("error", reject);
-      uploadStream.end(file.buffer);
-    });
-    await setGridFsFileUserId("noteFiles", fileId, userId);
-
-    const { title, description, university, course, studyType, year, tags } = req.body;
-
-    const note = await Note.create({
-      title: title || safeName,
-      description: description || "",
-      fileId,
-      fileName: safeName,
-      contentType: file.mimetype,
-      fileSize: file.size,
-      university,
-      course: course || req.body.branch,
-      studyType,
-      year: year ? Number(year) : undefined,
-      user_id: userId,
-      uploadedBy: user._id,
-      tags: tags ? (Array.isArray(tags) ? tags : String(tags).split(",").map((tag) => tag.trim())) : [],
-    });
-
-    const fileUrl = `/api/notes/${note.id}/file`;
-    res.status(201).json({ success: true, message: "Note uploaded", url: fileUrl, fileUrl });
-  } catch {
-    if (bucket && fileId) {
-      await bucket.delete(fileId).catch(() => {
-        logError("notes.upload_cleanup_failed");
-      });
+    const metadata = makeUploadMetadata(body, file.safeName);
+    if (!metadata) {
+      return res.status(400).json({ message: "Academic year must be a valid year" });
     }
-    logError("notes.upload_failed");
-    res.status(500).json({ message: "Upload failed" });
+    const userId = req.user.user_id;
+    if (typeof userId !== "string" || !/^\d{10}$/.test(userId)) {
+      return res.status(401).json({ message: "User identity is invalid. Please log in again." });
+    }
+    const account = await User.findById(req.user.id).select("name");
+    if (!account) {
+      return res.status(401).json({ message: "User account was not found. Please log in again." });
+    }
+    const usernameSegment = toS3PathSegment(account.name, "user", 60);
+    const titleSegment = toS3PathSegment(metadata.title, "note", 80);
+    const noteId = `${titleSegment}-${userId}-${randomUUID()}`;
+    const key = `notes/${usernameSegment}-${userId}/${noteId}`;
+    const uploadToken = jwt.sign(
+      {
+        sub: String(req.user.id),
+        userId,
+        key,
+        noteId,
+        fileName: file.safeName,
+        contentType: file.contentType,
+        fileSize: file.fileSize,
+        ...metadata,
+      },
+      process.env.JWT_SECRET,
+      {
+        algorithm: "HS256",
+        expiresIn: UPLOAD_TOKEN_TTL_SECONDS,
+        issuer: UPLOAD_TOKEN_ISSUER,
+        audience: UPLOAD_TOKEN_AUDIENCE,
+      }
+    );
+    const uploadUrl = await s3Storage.createUploadUrl({
+      key,
+      contentType: file.contentType,
+      fileSize: file.fileSize,
+    });
+    return res.status(201).json({
+      success: true,
+      uploadUrl,
+      uploadToken,
+      headers: {
+        "Content-Type": file.contentType,
+        "x-amz-server-side-encryption": "AES256",
+      },
+      expiresIn: UPLOAD_URL_TTL_SECONDS,
+      maxFileSizeBytes: getMaxNoteFileSizeBytes(),
+    });
+  } catch (error) {
+    if (isStorageConfigurationError(error)) {
+      logError("notes.storage_not_configured");
+      return res.status(503).json({ message: "File storage is not configured" });
+    }
+    logError("notes.upload_presign_failed");
+    return res.status(500).json({ message: "Could not prepare file upload" });
   }
 };
 
-export const listNotes = async (req, res) => {
+export const completeNoteUpload = async (req, res) => {
+  const claims = verifyUploadToken(req.body?.uploadToken, req.user.id);
+  if (!claims) {
+    return res.status(400).json({ message: "Upload authorization is invalid or expired" });
+  }
+
+  let objectVerified = false;
   try {
-    const notes = await Note.find()
-      .sort({ createdAt: -1 })
-      .select("title description fileName fileSize university course studyType year tags createdAt");
+    const existingNote = await s3Storage.getNoteRecord(claims.noteId);
+    if (existingNote) {
+      if (
+        String(existingNote.uploadedBy) !== String(req.user.id) ||
+        existingNote.s3Key !== claims.key
+      ) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+      return res.status(200).json({
+        success: true,
+        message: "Note upload was already completed",
+        note: serializeNote(existingNote),
+      });
+    }
+
+    const conflictingLegacyNote = await Note.findOne({ s3Key: claims.key });
+    if (conflictingLegacyNote) {
+      return res.status(409).json({ message: "This upload has already been associated with a note" });
+    }
+
+    await s3Storage.verifyUploadedObject({
+      key: claims.key,
+      contentType: claims.contentType,
+      fileSize: claims.fileSize,
+    });
+    objectVerified = true;
+
+    const note = {
+      _id: claims.noteId,
+      title: claims.title,
+      description: claims.description,
+      university: claims.university || undefined,
+      course: claims.course || undefined,
+      subject: claims.subject || undefined,
+      category: claims.category || undefined,
+      studyType: claims.studyType || undefined,
+      year: claims.year,
+      tags: claims.tags,
+      fileName: sanitizeFileName(claims.fileName),
+      s3Key: claims.key,
+      storageProvider: "s3",
+      contentType: claims.contentType,
+      fileSize: claims.fileSize,
+      uploadedBy: claims.sub,
+      visibility: claims.visibility,
+      uploadStatus: "active",
+      createdAt: new Date().toISOString(),
+    };
+    await s3Storage.putNoteRecord(note);
+    return res.status(201).json({
+      success: true,
+      message: "Note uploaded",
+      note: serializeNote(note),
+    });
+  } catch (error) {
+    if (error?.code === "INVALID_S3_UPLOAD") {
+      await s3Storage.deleteObject(claims.key).catch(() => {
+        logError("notes.invalid_upload_cleanup_failed");
+      });
+      return res.status(400).json({ message: "Uploaded file did not match its validated metadata" });
+    }
+    if (isStorageConfigurationError(error)) {
+      logError("notes.storage_not_configured");
+      return res.status(503).json({ message: "File storage is not configured" });
+    }
+
+    if (objectVerified) {
+      try {
+        const savedNote = await s3Storage.getNoteRecord(claims.noteId);
+        if (!savedNote) await s3Storage.deleteObject(claims.key);
+      } catch {
+        logError("notes.upload_cleanup_deferred");
+      }
+    }
+    logError("notes.upload_complete_failed");
+    return res.status(500).json({ message: "Could not save uploaded note" });
+  }
+};
+
+export const listNotes = async (_req, res) => {
+  try {
+    const [s3Notes, legacyNotes] = await Promise.all([
+      s3Storage.listNoteRecords(),
+      Note.find({
+        visibility: { $ne: "private" },
+        uploadStatus: { $ne: "deleting" },
+      })
+        .sort({ createdAt: -1 })
+        .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
+    ]);
+    const notes = [
+      ...s3Notes.filter(
+        (note) => note.visibility !== "private" && note.uploadStatus !== "deleting"
+      ),
+      ...legacyNotes,
+    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
     res.json({
       success: true,
@@ -118,9 +316,16 @@ export const listNotes = async (req, res) => {
 
 export const listMyNotes = async (req, res) => {
   try {
-    const notes = await Note.find({ uploadedBy: req.user.id })
-      .sort({ createdAt: -1 })
-      .select("title description fileName fileSize university course studyType year tags createdAt");
+    const [s3Notes, legacyNotes] = await Promise.all([
+      s3Storage.listNoteRecords(),
+      Note.find({ uploadedBy: req.user.id })
+        .sort({ createdAt: -1 })
+        .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
+    ]);
+    const notes = [
+      ...s3Notes.filter((note) => String(note.uploadedBy) === String(req.user.id)),
+      ...legacyNotes,
+    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
     res.json({
       success: true,
@@ -134,6 +339,21 @@ export const listMyNotes = async (req, res) => {
 
 export const deleteMyNote = async (req, res) => {
   try {
+    const s3Note = await s3Storage.getNoteRecord(req.params.id);
+    if (s3Note) {
+      if (String(s3Note.uploadedBy) !== String(req.user.id)) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+      if (!s3Note.s3Key || !s3Note._id) {
+        logError("notes.s3_metadata_invalid");
+        return res.status(500).json({ message: "Could not delete note" });
+      }
+      await s3Storage.putNoteRecord({ ...s3Note, uploadStatus: "deleting" });
+      await s3Storage.deleteObject(s3Note.s3Key);
+      await s3Storage.deleteNoteRecord(s3Note._id);
+      return res.json({ success: true, message: "Note deleted successfully" });
+    }
+
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ message: "Invalid note ID" });
     }
@@ -141,14 +361,27 @@ export const deleteMyNote = async (req, res) => {
     const note = await Note.findOne({
       _id: req.params.id,
       uploadedBy: req.user.id,
-    }).select("fileId");
+    }).select("fileId s3Key storageProvider");
 
     if (!note) {
       return res.status(404).json({ message: "Note not found" });
     }
 
-    await getNoteFilesBucket().delete(note.fileId);
-    await note.deleteOne();
+    if (note.s3Key) {
+      await Note.updateOne(
+        { _id: req.params.id, uploadedBy: req.user.id },
+        { $set: { uploadStatus: "deleting" } }
+      );
+      await s3Storage.deleteObject(note.s3Key);
+      await Note.deleteOne({ _id: req.params.id, uploadedBy: req.user.id });
+    } else {
+      await Note.updateOne(
+        { _id: req.params.id, uploadedBy: req.user.id },
+        { $set: { uploadStatus: "deleting" } }
+      );
+      await getNoteFilesBucket().delete(note.fileId);
+      await Note.deleteOne({ _id: req.params.id, uploadedBy: req.user.id });
+    }
 
     return res.json({ success: true, message: "Note deleted successfully" });
   } catch {
@@ -159,14 +392,51 @@ export const deleteMyNote = async (req, res) => {
 
 export const downloadNoteFile = async (req, res) => {
   try {
+    const s3Note = await s3Storage.getNoteRecord(req.params.id);
+    if (s3Note) {
+      if (
+        s3Note.uploadStatus === "deleting" ||
+        (s3Note.visibility === "private" &&
+          (!req.user || String(s3Note.uploadedBy) !== String(req.user.id)))
+      ) {
+        return res.status(404).json({ message: "Note file not found" });
+      }
+      const downloadUrl = await s3Storage.createDownloadUrl({
+        key: s3Note.s3Key,
+        fileName: s3Note.fileName,
+        contentType: s3Note.contentType,
+      });
+      res.set("Cache-Control", "private, no-store");
+      return res.redirect(302, downloadUrl);
+    }
+
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ message: "Invalid note ID" });
     }
 
-    const note = await Note.findById(req.params.id).select("fileId fileName contentType");
-    if (!note?.fileId) {
+    const note = await Note.findById(req.params.id).select(
+      "fileId s3Key fileName contentType uploadedBy visibility uploadStatus"
+    );
+    if (!note || note.uploadStatus === "deleting") {
       return res.status(404).json({ message: "Note file not found" });
     }
+    if (
+      note.visibility === "private" &&
+      (!req.user || String(note.uploadedBy) !== String(req.user.id))
+    ) {
+      return res.status(404).json({ message: "Note file not found" });
+    }
+
+    if (note.s3Key) {
+      const downloadUrl = await s3Storage.createDownloadUrl({
+        key: note.s3Key,
+        fileName: note.fileName,
+        contentType: note.contentType,
+      });
+      res.set("Cache-Control", "private, no-store");
+      return res.redirect(302, downloadUrl);
+    }
+    if (!note.fileId) return res.status(404).json({ message: "Note file not found" });
 
     const downloadStream = getNoteFilesBucket().openDownloadStream(note.fileId);
     res.setHeader("Content-Type", note.contentType || "application/octet-stream");
@@ -189,17 +459,23 @@ export const downloadNoteFile = async (req, res) => {
   }
 };
 
-const serializeNote = (note) => ({
-  _id: note.id,
-  title: note.title,
-  description: note.description,
-  fileName: note.fileName,
-  fileSize: note.fileSize,
-  university: note.university,
-  course: note.course,
-  studyType: note.studyType,
-  year: note.year,
-  tags: note.tags,
-  createdAt: note.createdAt,
-  fileUrl: `/api/notes/${note.id}/file`,
-});
+const serializeNote = (note) => {
+  const id = note._id || note.id;
+  return {
+    _id: id,
+    title: note.title,
+    description: note.description,
+    fileName: note.fileName,
+    fileSize: note.fileSize,
+    university: note.university,
+    course: note.course,
+    subject: note.subject,
+    category: note.category,
+    visibility: note.visibility || "public",
+    studyType: note.studyType,
+    year: note.year,
+    tags: note.tags,
+    createdAt: note.createdAt,
+    fileUrl: `/api/notes/${encodeURIComponent(String(id))}/file`,
+  };
+};

@@ -5,15 +5,103 @@ import jwt from "jsonwebtoken";
 import { AUTH_SESSION_SECONDS } from "../config/auth.js";
 import { logError } from "../utils/logger.js";
 import { hasValidFileSignature } from "../utils/fileValidation.js";
-import { setGridFsFileUserId } from "../utils/gridFsOwnership.js";
 import { ensureUserId, generateUserId } from "../utils/userId.js";
+import { s3Storage } from "../services/s3Storage.js";
 
 const BCRYPT_ROUNDS = 12;
+const PROFILE_PHOTO_PREFIX = "photos/";
+const LEGACY_PROFILE_PHOTO_PREFIX = "profile-photo/";
+
+const toS3PathSegment = (value, fallback, maxLength) => {
+  const segment = String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength)
+    .replace(/-+$/g, "");
+  return segment || fallback;
+};
 
 const getProfilePhotosBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
     bucketName: "profilePhotos",
   });
+
+const getProfilePhotoUrl = (user) => {
+  const version = user.profilePhotoS3Key || user.profilePhotoFileId;
+  return version
+    ? `/api/auth/profile/photo?v=${encodeURIComponent(version)}`
+    : null;
+};
+
+const storeProfilePhoto = async (user, file) => {
+  const userId = await ensureUserId(user);
+  const username = toS3PathSegment(user.name, "user", 60);
+  const key = `${PROFILE_PHOTO_PREFIX}${username}-${userId}`;
+  const oldS3Key = user.profilePhotoS3Key;
+  const oldFileId = user.profilePhotoFileId;
+
+  await s3Storage.putProfilePhoto({
+    key,
+    body: file.buffer,
+    contentType: file.mimetype,
+  });
+
+  user.profilePhotoS3Key = key;
+  user.profilePhotoFileId = undefined;
+  user.profilePhotoContentType = file.mimetype;
+  try {
+    await user.save();
+  } catch (error) {
+    if (key !== oldS3Key) {
+      await s3Storage.deleteObject(key).catch(() => {
+        logError("profile_photo.incomplete_file_cleanup_failed");
+      });
+    }
+    throw error;
+  }
+
+  if (oldS3Key && oldS3Key !== key) {
+    await s3Storage.deleteObject(oldS3Key).catch(() => {
+      logError("profile_photo.previous_file_cleanup_failed");
+    });
+  }
+  if (oldFileId) {
+    await getProfilePhotosBucket().delete(oldFileId).catch(() => {
+      logError("profile_photo.previous_file_cleanup_failed");
+    });
+  }
+  return key;
+};
+
+const migrateLegacyProfilePhoto = async (user) => {
+  let buffer;
+  let contentType = user.profilePhotoContentType;
+
+  if (user.profilePhotoFileId) {
+    const bucket = getProfilePhotosBucket();
+    const chunks = [];
+    const downloadStream = bucket.openDownloadStream(user.profilePhotoFileId);
+    for await (const chunk of downloadStream) {
+      chunks.push(chunk);
+    }
+    buffer = Buffer.concat(chunks);
+  } else if (user.profilePhotoS3Key?.startsWith(LEGACY_PROFILE_PHOTO_PREFIX)) {
+    const legacyPhoto = await s3Storage.getProfilePhoto({ key: user.profilePhotoS3Key });
+    buffer = legacyPhoto.body;
+    contentType ||= legacyPhoto.contentType;
+  } else {
+    throw new Error("Legacy profile photo location is invalid");
+  }
+
+  if (!hasValidFileSignature({ buffer, contentType })) {
+    throw new Error("Legacy profile photo contents are invalid");
+  }
+
+  return storeProfilePhoto(user, { buffer, mimetype: contentType });
+};
 
 const authCookieOptions = {
   httpOnly: true,
@@ -108,11 +196,22 @@ export const verifyUser = async (req, res) => {
     req.user.iat + AUTH_SESSION_SECONDS
   ) * 1000;
   const user = await User.findById(req.user.id).select(
-    "name email university course year profilePhotoFileId"
+    "name user_id email university course year profilePhotoS3Key profilePhotoFileId profilePhotoContentType"
   );
 
   if (!user) {
     return res.status(401).json({ isAuthenticated: false, message: "Not authenticated" });
+  }
+
+  if (
+    user.profilePhotoFileId ||
+    user.profilePhotoS3Key?.startsWith(LEGACY_PROFILE_PHOTO_PREFIX)
+  ) {
+    try {
+      await migrateLegacyProfilePhoto(user);
+    } catch {
+      logError("profile_photo.migration_failed");
+    }
   }
 
   res.json({
@@ -124,32 +223,39 @@ export const verifyUser = async (req, res) => {
       university: user.university,
       course: user.course,
       year: user.year,
-      profilePhotoUrl: user.profilePhotoFileId
-        ? `/api/auth/profile/photo?v=${user.profilePhotoFileId}`
-        : null,
+      profilePhotoUrl: getProfilePhotoUrl(user),
     },
   });
 };
 
 export const getProfilePhoto = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("profilePhotoFileId profilePhotoContentType");
-    if (!user?.profilePhotoFileId) {
+    const user = await User.findById(req.user.id).select(
+      "name user_id profilePhotoS3Key profilePhotoFileId profilePhotoContentType"
+    );
+    if (!user?.profilePhotoS3Key && !user?.profilePhotoFileId) {
       return res.status(404).json({ message: "Profile photo not found" });
     }
 
-    const downloadStream = getProfilePhotosBucket().openDownloadStream(user.profilePhotoFileId);
-    res.setHeader("Content-Type", user.profilePhotoContentType || "application/octet-stream");
-    res.setHeader("Cache-Control", "private, no-cache");
-    downloadStream.on("error", () => {
-      if (res.headersSent) {
-        logError("profile_photo.download_stream_failed");
-        res.destroy();
-      } else {
-        res.status(404).json({ message: "Profile photo not found" });
-      }
+    if (
+      user.profilePhotoS3Key &&
+      !user.profilePhotoS3Key.startsWith(LEGACY_PROFILE_PHOTO_PREFIX)
+    ) {
+      const url = await s3Storage.createProfilePhotoUrl({
+        key: user.profilePhotoS3Key,
+        contentType: user.profilePhotoContentType || "application/octet-stream",
+      });
+      res.setHeader("Cache-Control", "private, no-store");
+      return res.redirect(302, url);
+    }
+
+    await migrateLegacyProfilePhoto(user);
+    const url = await s3Storage.createProfilePhotoUrl({
+      key: user.profilePhotoS3Key,
+      contentType: user.profilePhotoContentType,
     });
-    downloadStream.pipe(res);
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.redirect(302, url);
   } catch (error) {
     logError("profile_photo.load_failed");
     res.status(500).json({ message: "Could not load profile photo" });
@@ -157,9 +263,6 @@ export const getProfilePhoto = async (req, res) => {
 };
 
 export const updateProfile = async (req, res) => {
-  let bucket;
-  let newFileId;
-
   try {
     const { name, email, university, course, year } = req.body;
     const user = await User.findById(req.user.id);
@@ -170,24 +273,10 @@ export const updateProfile = async (req, res) => {
       return res.status(409).json({ message: "An account with this email already exists" });
     }
 
-    const oldFileId = user.profilePhotoFileId;
     if (req.file) {
       if (!hasValidFileSignature(req.file)) {
         return res.status(400).json({ message: "Profile photo contents are invalid" });
       }
-      const userId = await ensureUserId(user);
-      bucket = getProfilePhotosBucket();
-      const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
-        metadata: { contentType: req.file.mimetype },
-      });
-      newFileId = uploadStream.id;
-
-      await new Promise((resolve, reject) => {
-        uploadStream.once("finish", resolve);
-        uploadStream.once("error", reject);
-        uploadStream.end(req.file.buffer);
-      });
-      await setGridFsFileUserId("profilePhotos", newFileId, userId);
     }
 
     user.name = name;
@@ -195,16 +284,10 @@ export const updateProfile = async (req, res) => {
     user.university = university;
     user.course = course;
     user.year = year;
-    if (req.file && newFileId) {
-      user.profilePhotoFileId = newFileId;
-      user.profilePhotoContentType = req.file.mimetype;
-    }
-    await user.save();
-
-    if (req.file && oldFileId && bucket) {
-      await bucket.delete(oldFileId).catch(() => {
-        logError("profile_photo.previous_file_cleanup_failed");
-      });
+    if (req.file) {
+      await storeProfilePhoto(user, req.file);
+    } else {
+      await user.save();
     }
 
     return res.json({
@@ -215,17 +298,10 @@ export const updateProfile = async (req, res) => {
         university: user.university,
         course: user.course,
         year: user.year,
-        profilePhotoUrl: user.profilePhotoFileId
-          ? `/api/auth/profile/photo?v=${user.profilePhotoFileId}`
-          : null,
+        profilePhotoUrl: getProfilePhotoUrl(user),
       },
     });
   } catch (error) {
-    if (bucket && newFileId) {
-      await bucket.delete(newFileId).catch(() => {
-        logError("profile_photo.incomplete_file_cleanup_failed");
-      });
-    }
     if (error.code === 11000) {
       return res.status(409).json({ message: "An account with this email already exists" });
     }
@@ -247,48 +323,17 @@ export const updateProfilePhoto = async (req, res) => {
     return res.status(400).json({ message: "Profile photo contents are invalid" });
   }
 
-  let bucket;
-  let newFileId;
-
   try {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    bucket = getProfilePhotosBucket();
-    const userId = await ensureUserId(user);
-    const oldFileId = user.profilePhotoFileId;
-    const uploadStream = bucket.openUploadStream(`profile-${user.id}`, {
-      metadata: { contentType: req.file.mimetype },
-    });
-    newFileId = uploadStream.id;
+    const key = await storeProfilePhoto(user, req.file);
 
-    await new Promise((resolve, reject) => {
-      uploadStream.once("finish", resolve);
-      uploadStream.once("error", reject);
-      uploadStream.end(req.file.buffer);
-    });
-    await setGridFsFileUserId("profilePhotos", newFileId, userId);
-
-    user.profilePhotoFileId = newFileId;
-    user.profilePhotoContentType = req.file.mimetype;
-    await user.save();
-
-    if (oldFileId) {
-      await bucket.delete(oldFileId).catch(() => {
-        logError("profile_photo.previous_file_cleanup_failed");
-      });
-    }
-
-    res.json({
+    return res.json({
       success: true,
-      profilePhotoUrl: `/api/auth/profile/photo?v=${newFileId}`,
+      profilePhotoUrl: getProfilePhotoUrl({ profilePhotoS3Key: key }),
     });
-  } catch (error) {
-    if (bucket && newFileId) {
-      await bucket.delete(newFileId).catch(() => {
-        logError("profile_photo.incomplete_file_cleanup_failed");
-      });
-    }
+  } catch {
     logError("profile_photo.update_failed");
     res.status(500).json({ message: "Could not update profile photo" });
   }
