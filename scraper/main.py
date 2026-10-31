@@ -1,9 +1,8 @@
-import hashlib
 import os
 import re
 import sys
 import json
-import unicodedata
+import uuid
 from datetime import datetime, timezone
 
 import boto3
@@ -60,56 +59,68 @@ HEADERS = {
 DOWNLOAD_DIR = os.path.join(os.path.dirname(__file__), "downloaded_pdfs")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ── In-memory duplicate index ─────────────────────────────────────────────────
-# Loaded once at startup from S3; updated on every successful upload.
-# Stores note_id strings — keyed off title+filename so lookups are O(1).
-_existing_note_ids: set[str] = set()
-# Maps "title||filename" → note_id for content-based duplicate detection
-_existing_note_keys: set[str] = set()
+
+# ── Title index ───────────────────────────────────────────────────────────────
+# Loaded once at startup: a set of normalised titles already stored in S3.
+# If a title is NOT in this set it is new and should be uploaded.
+# If it IS present the PDF was already stored — skip it.
+# When a record is deleted from S3 its title is removed from the index,
+# so the next run will re-insert it automatically.
+
+_existing_titles: set[str] = set()
 
 
-def _make_note_key(title: str, filename: str) -> str:
-    """Stable string key combining title and filename for duplicate detection."""
-    return f"{title.strip().lower()}||{filename.strip().lower()}"
+def _normalise_title(title: str) -> str:
+    """Lowercase + collapse whitespace for reliable comparison."""
+    return re.sub(r"\s+", " ", title.strip().lower())
 
 
-def load_existing_notes_from_s3() -> None:
+def load_existing_titles() -> None:
     """
-    Scan all metadata/*.json objects in the bucket once at startup and
-    populate the in-memory duplicate index.  This avoids a head_object
-    round-trip for every PDF during the run.
+    Scan every metadata/*.json in the bucket and collect their titles
+    into the in-memory _existing_titles set.
+    Only the 'title' field is read — no full file download needed.
     """
-    print("[S3] Loading existing note index from bucket (this may take a moment)...")
-    count = 0
+    global _existing_titles
+    _existing_titles = set()
+
+    print("[S3] Loading existing note titles from metadata...")
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=AWS_S3_BUCKET, Prefix=NOTE_METADATA_PREFIX):
+    pages = paginator.paginate(Bucket=AWS_S3_BUCKET, Prefix=NOTE_METADATA_PREFIX)
+
+    count = 0
+    for page in pages:
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            note_id = key[len(NOTE_METADATA_PREFIX):].removesuffix(".json")
-            if not note_id:
+            # Skip the prefix itself if it appears as a zero-byte object
+            if key == NOTE_METADATA_PREFIX:
                 continue
-            _existing_note_ids.add(note_id)
-            # Fetch the record to extract title + fileName for content-based check
             try:
-                result = s3.get_object(Bucket=AWS_S3_BUCKET, Key=key)
-                record = json.loads(result["Body"].read())
-                note_key = _make_note_key(
-                    record.get("title", ""),
-                    record.get("fileName", ""),
-                )
-                _existing_note_keys.add(note_key)
-                count += 1
-            except Exception:
-                # If we can't read the record, at least we have the note_id
-                count += 1
+                response = s3.get_object(Bucket=AWS_S3_BUCKET, Key=key)
+                record   = json.loads(response["Body"].read().decode("utf-8"))
+                title    = record.get("title", "")
+                if title:
+                    _existing_titles.add(_normalise_title(title))
+                    count += 1
+            except Exception as e:
+                print(f"  [Warning] Could not read metadata key '{key}': {e}")
 
-    print(f"[S3] Index loaded — {count} existing note(s) found.\n")
+    print(f"[S3] Loaded {count} existing note title(s) from bucket.\n")
 
 
-# ── S3 helpers ────────────────────────────────────────────────────────────────
+def title_already_exists(title: str) -> bool:
+    """Return True if a note with this exact title is already in S3."""
+    return _normalise_title(title) in _existing_titles
+
+
+def register_title(title: str) -> None:
+    """Add a newly uploaded title to the in-memory index."""
+    _existing_titles.add(_normalise_title(title))
+
+
+# ── S3 upload helpers ─────────────────────────────────────────────────────────
 
 def upload_pdf_to_s3(pdf_bytes: bytes, s3_key: str, filename: str) -> None:
-    """Upload a PDF binary to S3."""
     s3.put_object(
         Bucket=AWS_S3_BUCKET,
         Key=s3_key,
@@ -118,7 +129,7 @@ def upload_pdf_to_s3(pdf_bytes: bytes, s3_key: str, filename: str) -> None:
         ContentDisposition=f'attachment; filename="{filename}"',
         ServerSideEncryption="AES256",
     )
-    print(f"  [S3] Uploaded PDF     → s3://{AWS_S3_BUCKET}/{s3_key}")
+    print(f"  [S3] Uploaded PDF      → s3://{AWS_S3_BUCKET}/{s3_key}")
 
 
 def put_note_record(note: dict) -> None:
@@ -131,31 +142,17 @@ def put_note_record(note: dict) -> None:
         ContentType="application/json",
         ServerSideEncryption="AES256",
     )
-    print(f"  [S3] Saved metadata   → s3://{AWS_S3_BUCKET}/{metadata_key}")
+    print(f"  [S3] Saved metadata    → s3://{AWS_S3_BUCKET}/{metadata_key}")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Slug helper ───────────────────────────────────────────────────────────────
 
 def to_s3_segment(value: str, fallback: str = "note", max_len: int = 80) -> str:
-    """Convert any string to a safe lowercase S3 path segment."""
+    import unicodedata
     normalized = unicodedata.normalize("NFKD", value or "")
     ascii_str  = normalized.encode("ascii", "ignore").decode("ascii")
     slug       = re.sub(r"[^a-z0-9]+", "-", ascii_str.lower()).strip("-")
     return (slug or fallback)[:max_len].rstrip("-")
-
-
-def make_deterministic_note_id(title: str, filename: str) -> str:
-    """
-    Build a stable, deterministic note ID from title + filename.
-    Using a hash means the same PDF always produces the same ID, so the
-    metadata key lookup is a reliable duplicate check without a UUID.
-    """
-    title_slug    = to_s3_segment(title, "note", 60)
-    filename_slug = to_s3_segment(filename.replace(".pdf", ""), "file", 40)
-    content_hash  = hashlib.sha1(
-        f"{title.strip().lower()}||{filename.strip().lower()}".encode()
-    ).hexdigest()[:12]
-    return f"{title_slug}-{filename_slug}-{content_hash}"
 
 
 # ── HTML extraction helpers ───────────────────────────────────────────────────
@@ -224,18 +221,14 @@ def extract_metadata_from_html(soup: BeautifulSoup) -> dict:
 
 def infer_study_type(title: str) -> str:
     lower = title.lower()
-    if "assignment" in lower:
-        return "Assignments"
+    if "assignment" in lower:                                          return "Assignments"
     if "question bank" in lower or "que bank" in lower or "question paper" in lower:
-        return "Que Banks"
+                                                                       return "Que Banks"
     if "paper" in lower or "pyq" in lower or "mid" in lower or "exam" in lower:
-        return "Papers"
-    if "ppt" in lower or "presentation" in lower or "slide" in lower:
-        return "PPT"
-    if "lab" in lower or "manual" in lower:
-        return "Lab Manual"
-    if "syllabus" in lower:
-        return "Syllabus"
+                                                                       return "Papers"
+    if "ppt" in lower or "presentation" in lower or "slide" in lower: return "PPT"
+    if "lab" in lower or "manual" in lower:                           return "Lab Manual"
+    if "syllabus" in lower:                                            return "Syllabus"
     return "Notes"
 
 
@@ -254,40 +247,22 @@ def upload_note_to_s3(
     tags:        list,
 ) -> str | None:
     """
-    Check for duplicates, then upload PDF + metadata to S3.
-
-    Duplicate detection (two layers):
-      1. Content key  — title + filename combination (catches re-runs after
-                        the index is warm).
-      2. note_id key  — deterministic hash-based ID checked against the
-                        in-memory set (fast, no S3 round-trip).
-
-    Returns the note_id on success, or None if the note was skipped.
+    Upload a PDF to S3 and write its metadata JSON record.
+    Returns the note _id on success, or None if skipped.
 
     S3 layout (mirrors the backend):
-      notes/<uploader-slug>/<note-id>    ← actual PDF
-      metadata/<note-id>.json            ← note record (read by the API)
+      notes/<uploader-slug>/<note-id>   ← actual PDF
+      metadata/<note-id>.json           ← note record (read by API)
     """
-    note_key = _make_note_key(title, filename)
-    note_id  = make_deterministic_note_id(title, filename)
-
-    # ── Layer 1: content-based duplicate check (in-memory, O(1)) ─────────────
-    if note_key in _existing_note_keys:
-        print(f"  [Skipped] Already exists — same title + filename: '{title}'")
-        return None
-
-    # ── Layer 2: note_id duplicate check (in-memory, O(1)) ───────────────────
-    if note_id in _existing_note_ids:
-        print(f"  [Skipped] Already exists — note_id: {note_id}")
-        _existing_note_keys.add(note_key)   # keep index consistent
-        return None
-
-    # ── Upload PDF ────────────────────────────────────────────────────────────
+    title_slug    = to_s3_segment(title, "note", 80)
     uploader_slug = to_s3_segment(SCRAPER_UPLOADER_ID, "scraper", 60)
+    note_id       = f"{title_slug}-{str(uuid.uuid4())}"
     s3_key        = f"{NOTE_FILE_PREFIX}{uploader_slug}/{note_id}"
+
+    # Upload PDF
     upload_pdf_to_s3(pdf_bytes, s3_key, filename)
 
-    # ── Write metadata record ─────────────────────────────────────────────────
+    # Build note record (matches schema in s3Storage.putNoteRecord)
     now = datetime.now(timezone.utc).isoformat()
     note_record = {
         "_id":             note_id,
@@ -311,11 +286,11 @@ def upload_note_to_s3(
         "createdAt":       now,
         "updatedAt":       now,
     }
+
     put_note_record(note_record)
 
-    # ── Update in-memory index so later iterations see this note ──────────────
-    _existing_note_ids.add(note_id)
-    _existing_note_keys.add(note_key)
+    # Add to in-memory index so subsequent PDFs in this run are also deduplicated
+    register_title(title)
 
     return note_id
 
@@ -327,17 +302,30 @@ def scrape_materials():
     added   = 0
     skipped = 0
 
+    # Load existing titles from S3 once before scraping starts
+    load_existing_titles()
+
     page_num = 1
     session  = requests.Session()
 
     while True:
         print(f"\n--- Scraping Page {page_num} ---")
-        res = session.get(
-            f"{BASE_URL}/materials",
-            headers=HEADERS,
-            params={"page": page_num},
-            timeout=30,
-        )
+
+        try:
+            res = session.get(
+                f"{BASE_URL}/materials",
+                headers=HEADERS,
+                params={"page": page_num},
+                timeout=30,
+            )
+        except requests.exceptions.ConnectionError as e:
+            print(f"[Error] Cannot connect to {BASE_URL}.")
+            print(f"        Check your internet connection and try again.")
+            print(f"        Details: {e}")
+            break
+        except requests.exceptions.Timeout:
+            print(f"[Error] Request timed out on page {page_num}. Retrying is recommended.")
+            break
 
         if res.status_code != 200:
             print(f"[Error] Failed to fetch page {page_num}: HTTP {res.status_code}")
@@ -420,11 +408,14 @@ def scrape_materials():
                         if stem and stem.lower() not in title.lower():
                             note_title = f"{title} - {stem}"
 
-                    # ── Duplicate check BEFORE downloading ────────────────────
-                    note_key = _make_note_key(note_title, filename)
-                    note_id  = make_deterministic_note_id(note_title, filename)
-                    if note_key in _existing_note_keys or note_id in _existing_note_ids:
-                        print(f"  [Skipped] Duplicate detected before download: '{note_title}'")
+                    # ── Duplicate check by title ──────────────────────────────
+                    # Query the in-memory title index (built from S3 metadata at
+                    # startup).  If the title is already there the PDF exists in
+                    # the bucket — skip without downloading.
+                    # If the record was deleted from S3 the title will NOT be in
+                    # the index, so the PDF will be re-inserted on the next run.
+                    if title_already_exists(note_title):
+                        print(f"  [Skipped] Already in S3 (same title): '{note_title}'")
                         skipped += 1
                         continue
 
@@ -440,7 +431,7 @@ def scrape_materials():
                     print(f"  Saved locally: {local_path}")
 
                     # Upload to S3
-                    result_id = upload_note_to_s3(
+                    note_id = upload_note_to_s3(
                         pdf_bytes   = pdf_bytes,
                         filename    = filename,
                         title       = note_title,
@@ -453,13 +444,12 @@ def scrape_materials():
                         tags        = tags,
                     )
 
-                    if result_id:
+                    if note_id:
+                        print(f"  [Added] note_id: {note_id}")
                         added += 1
-                        print(f"  [Added]   note_id: {result_id}  (added={added}, skipped={skipped})")
-                    else:
-                        skipped += 1
-                        print(f"  [Skipped] (added={added}, skipped={skipped})")
 
+            except requests.exceptions.ConnectionError as e:
+                print(f"  [Error] Network error while processing {material_url}: {e}")
             except Exception as err:
                 print(f"  [Error] {material_url}: {err}")
 
@@ -467,7 +457,7 @@ def scrape_materials():
 
     # ── Final summary ─────────────────────────────────────────────────────────
     print("\n" + "=" * 50)
-    print("  SCRAPE COMPLETE")
+    print(f"  Scraping complete.")
     print(f"  Added   : {added}")
     print(f"  Skipped : {skipped}")
     print(f"  Total   : {added + skipped}")
@@ -475,6 +465,4 @@ def scrape_materials():
 
 
 if __name__ == "__main__":
-    # Load the existing note index from S3 before scraping
-    load_existing_notes_from_s3()
     scrape_materials()
