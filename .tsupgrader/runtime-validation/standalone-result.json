@@ -1,13 +1,13 @@
 {
-  "planHash": "44d39cd3028a00723dc29cfe04fbbd85e1ecf89bb7372944b5505ad0762e5767",
+  "planHash": "4dbd08ddc5fb0b0ca039cf812adb8a647dffe51b552238451f9647d6c211edb9",
   "phase": "standalone",
-  "recordedAtUtc": "2026-10-26T17:48:22.9514046Z",
-  "retryCount": 2,
+  "recordedAtUtc": "2026-10-30T18:09:34.7478905Z",
+  "retryCount": 1,
   "resetBaseline": false,
   "complete": true,
   "result": {
     "setupSucceeded": true,
-    "setupDurationMs": 19103,
+    "setupDurationMs": 18099,
     "setupFailureOutput": null,
     "assertions": [
       {
@@ -20,31 +20,22 @@
         "skippedReason": null,
         "exitCode": 0,
         "outputSample": "",
-        "durationMs": 82
+        "durationMs": 106
       },
       {
         "name": "tests-pass",
         "kind": "process",
-        "verificationMethod": "test-results",
+        "verificationMethod": "exit-code",
         "passed": true,
         "timedOut": false,
         "skipped": false,
         "skippedReason": null,
         "exitCode": 0,
-        "outputSample": "\r\n\u003E backend@1.0.0 test\r\n\u003E node --test test/security.test.js\r\n\r\n\u2714 password hashes are excluded from normal user queries (1.4891ms)\r\n\u2714 password changes require authentication and the public reset route is absent (0.3591ms)\r\n\u2714 logout clears the authentication cookie without returning it (0.2141ms)\r\n\u2714 unauthenticated protected requests are rejected (0.8964ms)\r\n\u2714 session verification returns profile fields without exposing the user ID (0.2501ms)\r\n\u2714 upload validation checks file contents against the declared type (0.186ms)\r\n\u2714 shared note responses omit storage and ownership internals (0.4076ms)\r\n\u2714 public note statistics return counts only (0.3547ms)\r\n\u2714 note deletion is scoped to the authenticated owner (0.3939ms)\r\n\u2714 registration stores a hash and only returns a generic success message (582.5758ms)\r\n\u2714 incorrect passwords receive a generic response without account details (2.9002ms)\r\n\u2714 authenticated password changes verify the current password and clear the session (553.8544ms)\r\n\u2714 incorrect current password does not change the stored password (5.2746ms)\r\n\u2714 validation responses never echo submitted credentials (92.0824ms)\r\n\u2139 tests 14\r\n\u2139 suites 0\r\n\u2139 pass 14\r\n\u2139 fail 0\r\n\u2139 cancelled 0\r\n\u2139 skipped 0\r\n\u2139 todo 0\r\n\u2139 duration_ms 2169.9218\r\n",
-        "durationMs": 3022,
-        "testResults": {
-          "testFramework": "jest",
-          "runnerDetectedFrom": "package_json",
-          "testsTotal": 0,
-          "testsPassed": 0,
-          "testsFailed": 0,
-          "testsSkipped": 0,
-          "parseFailed": true
-        }
+        "outputSample": "\r\n\u003E backend@1.0.0 test\r\n\u003E node --test test/security.test.js\r\n\r\n\u2714 encrypted auth requests decrypt to the original user fields (113.6781ms)\r\n\u2714 invalid encrypted auth requests are rejected without exposing details (0.3067ms)\r\n\u2714 encrypted auth requests reject additional plaintext fields (0.5851ms)\r\n\u2714 password hashes are excluded from normal user queries (0.1202ms)\r\n\u2714 user IDs are unique ten-digit strings in the user and note schemas (0.6714ms)\r\n\u2714 legacy users receive a unique user ID when they next upload (0.4538ms)\r\n\u2714 notes reference their user by the schema-generated MongoDB ID (0.1153ms)\r\n\u2714 public notes reads use a separate rate-limit bucket from other API requests (0.1474ms)\r\n\u2714 upload APIs require authentication while shared note reads remain public (0.3141ms)\r\n\u2714 logout clears the authentication cookie without returning it (0.4844ms)\r\n\u2714 unauthenticated protected requests are rejected (0.4798ms)\r\n\u2714 session verification returns profile fields without exposing the user ID (0.3407ms)\r\n\u2714 session verification migrates an existing GridFS profile photo to S3 (3.5189ms)\r\n\u2714 upload validation checks file contents against the declared type (0.1426ms)\r\n\u2714 shared note responses omit storage and ownership internals (0.456ms)\r\n\u2714 public listings include S3-only note records and exclude private notes (0.2497ms)\r\n\u2714 unauthenticated requests can load the public notes list (61.3891ms)\r\n\u2714 public note statistics return counts only (0.4475ms)\r\n\u2714 note deletion is scoped to the authenticated owner (0.3773ms)\r\n\u2714 note upload URLs validate metadata and bind the upload to the authenticated user (4.1045ms)\r\n\u2714 presign rejects unsupported and oversized files before contacting S3 (0.3323ms)\r\n{\u0022level\u0022:\u0022error\u0022,\u0022event\u0022:\u0022notes.upload_complete_failed\u0022}\r\n{\u0022level\u0022:\u0022error\u0022,\u0022event\u0022:\u0022notes.delete_failed\u0022}\r\n\u2714 S3 PUT signatures bind the exact file size and expire quickly (30.2077ms)\r\n\u2714 profile photos are stored in the photos S3 prefix with encryption (0.7198ms)\r\n\u2714 new note records use the root metadata prefix (0.5424ms)\r\n\u2714 note records list from current and legacy metadata prefixes (1.4736ms)\r\n\u2714 S3 upload verification checks size, MIME, encryption, and file signature (1.0928ms)\r\n\u2714 S3 download URLs expire quickly and preserve a safe original filename (7.0203ms)\r\n\u2714 upload validation checks extension, MIME type, size, and file signature (0.3721ms)\r\n\u2714 upload completion stores private note metadata in S3 without creating a MongoDB note (2.1009ms)\r\n\u2714 S3 metadata write failure after file verification cleans up the unreferenced file (1.5504ms)\r\n\u2714 expired upload tokens are rejected before an S3 operation (1.3648ms)\r\n\u2714 invalid uploaded content is removed and not saved as a note (0.9839ms)\r\n\u2714 upload tokens cannot be completed by another user (0.5605ms)\r\n\u2714 private note downloads are hidden from other users (0.3268ms)\r\n\u2714 public S3 notes can still be downloaded without signing in (0.1922ms)\r\n\u2714 S3 note deletion marks the record before removing the object (0.295ms)\r\n\u2714 failed S3 deletion leaves the note marked for a safe retry (0.303ms)\r\n\u2714 profile photo uploads store the image in S3 and keep the object key on the user (0.3273ms)\r\n\u2714 legacy GridFS profile photos migrate to S3 when requested (1.4202ms)\r\n\u2714 legacy profile-photo S3 objects move to photos when requested (0.5175ms)\r\n\u2714 profile edits store the uploaded photo in S3 (0.5829ms)\r\n\u2714 profile photo endpoint redirects to a short-lived S3 URL (0.2963ms)\r\n\u2714 registration stores a hash and only returns a generic success message (547.659ms)\r\n\u2714 login assigns and saves a user ID for an existing account (4.1698ms)\r\n\u2714 incorrect passwords receive a generic response without account details (2.8773ms)\r\n\u2714 authenticated password changes verify the current password and clear the session (517.4416ms)\r\n\u2714 incorrect current password does not change the stored password (4.6897ms)\r\n\u2714 validation responses never echo submitted credentials (48.195ms)\r\n\u2139 tests 48\r\n\u2139 suites 0\r\n\u2139 pass 48\r\n\u2139 fail 0\r\n\u2139 cancelled 0\r\n\u2139 skipped 0\r\n\u2139 todo 0\r\n\u2139 duration_ms 3572.7868\r\n",
+        "durationMs": 4607
       },
       {
-        "name": "notes-list-requires-authentication",
+        "name": "public-notes-list",
         "kind": "http-probe",
         "verificationMethod": "http-status",
         "passed": true,
@@ -52,8 +43,8 @@
         "skipped": false,
         "skippedReason": null,
         "exitCode": null,
-        "outputSample": "HTTP 401\n{\u0022message\u0022:\u0022Unauthorized: No token provided\u0022}\n--- server output ---\n\u25C7 injected env (2) from .env // tip: \u25C8 encrypted .env [www.dotenvx.com]\r\n{\u0022level\u0022:\u0022info\u0022,\u0022event\u0022:\u0022server.started\u0022}\r\n",
-        "durationMs": 1049
+        "outputSample": "HTTP 200\n{\u0022success\u0022:true,\u0022notes\u0022:[{\u0022_id\u0022:\u0022api-research-paper-1578026177-8949b0f9-f019-4b86-9b42-0d86eb2d797f\u0022,\u0022title\u0022:\u0022API research paper\u0022,\u0022description\u0022:\u0022API Documentation containing detailed information about API endpoints, HTTP methods, request and response formats, authentication, parameters, status codes, and error handling. Helps developers understand, integrate, test, and maintain APIs efficiently with clear technical references and practical examples.\u0022,\u0022fileName\u0022:\u0022horvath2019.pdf\u0022,\u0022fileSize\u0022:244770,\u0022university\u0022:\u0022COEP Pune\u0022,\u0022course\u0022:\u0022Computer Science \u0026 Engineering\u0022,\u0022subject\u0022:\u0022API\u0022,\u0022category\u0022:\u0022Papers\u0022,\u0022visibility\u0022:\u0022public\u0022,\u0022studyType\u0022:\u0022Papers\u0022,\u0022year\u0022:2026,\u0022tags\u0022:[],\u0022createdAt\u0022:\u00222026-10-30T17:41:14.880Z\u0022,\u0022fileUrl\u0022:\u0022/api/notes/api-research-paper-1578026177-8949b0f9-f019-4b86-9b42-0d86eb2d797f/file\u0022},{\u0022_id\u0022:\u0022nptl-course-list-1578026177-78d65f2c-ce01-4585-aa8e-01c426162bb4\u0022,\u0022title\u0022:\u0022NPTL course list\u0022,\u0022description\u0022:\u0022NPTEL (National Programme on Technology Enhanced Learning) course collection featuring online courses from IITs and IISc across engineering, computer science, programming, artificial intelligence, data science, mathematics, and management. Includes course materials, video lectures, assignments, study resources, and certification details to help students enhance their technical knowledge and professional skills.\u0022,\u0022fileName\u0022:\u0022NPTEL Final Course List1 (Jan - Apr 2026).xlsx\u0022,\u0022fileSize\u0022:68379,\u0022university\u0022:\u0022COEP Pune\u0022,\u0022course\u0022:\u0022Computer Science \u0026 Engineering\u0022,\u0022subject\u0022:\u0022Computer Science\u0022,\u0022category\u0022:\u0022Papers\u0022,\u0022visibility\u0022:\u0022public\u0022,\u0022studyType\u0022:\u0022Papers\u0022,\u0022year\u0022:2026,\u0022tags\u0022:[],\u0022createdAt\u0022:\u00222026-10-30T17:13:29.937Z\u0022,\u0022fileUrl\u0022:\u0022/api/notes/nptl-course-list-1578026177-78d65f2c-ce01-4585-aa8e-01c426162bb4/file\u0022},{\u0022_id\u0022:\u0022api-documentation-7054568121-08d5267e-4542-4918-8311-7863402913b2\u0022,\u0022title\u0022:\u0022API Documentation\u0022,\u0022description\u0022:\u0022API Documentation containing detailed information about API endpoints, HTTP methods, request and response formats, authentication, parameters, status codes, and error handling. Helps developers understand, integrate, test, and maintain APIs efficiently with clear technical references and practical examples.\u0022,\u0022fileName\u0022:\u0022robustAPIKnowledge2021.pdf\u0022,\u0022fileSize\u0022:9320635,\u0022university\u0022:\u0022VNIT Nagpur\u0022,\u0022course\u0022:\u0022Electrical Engineering\u0022,\u0022subject\u0022:\u0022Computer Engineering\u0022,\u0022category\u0022:\u0022Papers\u0022,\u0022visibility\u0022:\u0022public\u0022,\u0022studyType\u0022:\u0022Papers\u0022,\u0022year\u0022:2026,\u0022tags\u0022:[],\u0022createdAt\u0022:\u00222026-10-30T16:36:41.448Z\u0022,\u0022fileUrl\u0022:\u0022/api/notes/api-documentation-7054568121-08d5267e-4542-4918-8311-7863402913b2/file\u0022},{\u0022_id\u0022:\u0022hiring-calender-5796049897-449f6dff-ee75-4c35-abbe-a144057201d9\u0022,\u0022title\u0022:\u0022Hiring Calender\u0022,\u0022description\u0022:\u0022Hiring Calendar containing recruitment schedules, interview dates, job application deadlines, placement drives, company visits, and important hiring events. Helps students and job seekers track upcoming opportunities, manage interview preparation, and stay updated on recruitment activities.\u0022,\u0022fileName\u0022:\u0022IT Giants Are Hiring.pdf\u0022,\u0022fileSize\u0022:3992455,\u0022university\u0022:\u0022OTHER\u0022,\u0022course\u0022:\u0022OTHER\u0022,\u0022subject\u0022:\u0022other\u0022,\u0022category\u0022:\u0022Other\u0022,\u0022visibility\u0022:\u0022public\u0022,\u0022studyType\u0022:\u0022Other\u0022,\u0022year\u0022:2026,\u0022tags\u0022:[],\u0022createdAt\u0022:\u00222026-10-30T07:56:07.712Z\u0022,\u0022fileUrl\u0022:\u0022/api/notes/hiring-calender-5796049897-449f6dff-ee75-4c35-abbe-a144057201d9/file\u0022},{\u0022_id\u0022:\u0022073cbe1c-6c74-4eb4-9ffa-484a7f5d1ac2\u0022,\u0022title\u0022:\u0022Testcase for the website\u0022,\u0022description\u0022:\u0022Test cases for the website covering functional testing, UI/UX validation, user authentication, file uploads, downloads, search functionality, database operations, security, and responsive design. Includes positive and negative test scenarios to verify application performance, data accuracy, error handling, and overall reliability across different devices and browsers.\u0022,\u0022fileName\u0022:\u0022Testsprite.pdf\u0022,\u0022fileSize\u0022:175444,\u0022university\u0022:\u0022COEP Pune\u0022,\u0022course\u0022:\u0022Data Science Engineering\u0022,\u0022subject\u0022:\u0022Data Science\u0022,\u0022category\u0022:\u0022Papers\u0022,\u0022visibility\u0022:\u0022public\u0022,\u0022studyType\u0022:\u0022Papers\u0022,\u0022year\u0022:2026,\u0022tags\u0022:[],\u0022createdAt\u0022:\u00222026-10-30T06:39:14.533Z\u0022,\u0022fileUrl\u0022:\u0022/api/notes/073cbe1c-6c74-4eb4-9ffa-484a7f5d1ac2/file\u0022},{\u0022_id\u0022:\u00226ae437d9b61018b6ede99833\u0022,\n\u2026[truncated]",
+        "durationMs": 14361
       },
       {
         "name": "notes-upload-list-requires-authentication",
@@ -64,8 +55,8 @@
         "skipped": false,
         "skippedReason": null,
         "exitCode": null,
-        "outputSample": "HTTP 401\n{\u0022message\u0022:\u0022Unauthorized: No token provided\u0022}\n--- server output ---\n\u25C7 injected env (2) from .env // tip: \u25C8 secrets for agents [www.dotenvx.com]\r\n{\u0022level\u0022:\u0022info\u0022,\u0022event\u0022:\u0022server.started\u0022}\r\n",
-        "durationMs": 1061
+        "outputSample": "HTTP 401\n{\u0022message\u0022:\u0022Unauthorized: No token provided\u0022}\n--- server output ---\n\u25C7 injected env (7) from .env // tip: \u25C8 encrypted .env [www.dotenvx.com]\r\n{\u0022level\u0022:\u0022info\u0022,\u0022event\u0022:\u0022server.started\u0022}\r\n",
+        "durationMs": 1549
       },
       {
         "name": "note-statistics-route",
@@ -76,8 +67,8 @@
         "skipped": false,
         "skippedReason": null,
         "exitCode": null,
-        "outputSample": "HTTP 200\n{\u0022success\u0022:true,\u0022stats\u0022:{\u0022total\u0022:10,\u0022universities\u0022:8,\u0022studyTypes\u0022:5}}\n--- server output ---\n\u25C7 injected env (2) from .env // tip: \u2318 multiple files { path: [\u0027.env.local\u0027, \u0027.env\u0027] }\r\n{\u0022level\u0022:\u0022info\u0022,\u0022event\u0022:\u0022server.started\u0022}\r\n{\u0022level\u0022:\u0022info\u0022,\u0022event\u0022:\u0022database.connected\u0022}\r\n",
-        "durationMs": 2127
+        "outputSample": "HTTP 200\n{\u0022success\u0022:true,\u0022stats\u0022:{\u0022total\u0022:46,\u0022universities\u0022:12,\u0022studyTypes\u0022:5}}\n--- server output ---\n\u25C7 injected env (7) from .env // tip: \u2318 suppress logs { quiet: true }\r\n{\u0022level\u0022:\u0022info\u0022,\u0022event\u0022:\u0022server.started\u0022}\r\n{\u0022level\u0022:\u0022info\u0022,\u0022event\u0022:\u0022database.connected\u0022}\r\n",
+        "durationMs": 8270
       }
     ],
     "executions": [
@@ -116,7 +107,7 @@
         "platform": "win32"
       },
       {
-        "source": "notes-list-requires-authentication",
+        "source": "public-notes-list",
         "resolvedExecutable": "C:\\Program Files\\nodejs\\node.EXE",
         "args": [
           "index.js"
