@@ -286,27 +286,106 @@ export const completeNoteUpload = async (req, res) => {
   }
 };
 
-export const listNotes = async (_req, res) => {
+const noteMatchesFilters = (note, filters) => {
+  const searchText = [
+    note.title,
+    note.description,
+    note.fileName,
+    note.university,
+    note.subject,
+    note.course,
+    note.studyType,
+    note.year,
+    ...(note.tags || []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const searchTerms = filters.q.toLowerCase().split(/\s+/).filter(Boolean);
+  const subjectTerms = filters.subject.toLowerCase().split(/\s+/).filter(Boolean);
+
+  return (
+    searchTerms.every((term) => searchText.includes(term)) &&
+    (!filters.university || note.university?.toLowerCase().includes(filters.university.toLowerCase())) &&
+    (!filters.course || note.course?.toLowerCase().includes(filters.course.toLowerCase())) &&
+    subjectTerms.every((term) => searchText.includes(term)) &&
+    (!filters.studyType || note.studyType === filters.studyType) &&
+    (!filters.year || String(note.year || "") === filters.year)
+  );
+};
+
+const compareNotesByCreatedAt = (first, second) =>
+  new Date(second.createdAt).getTime() - new Date(first.createdAt).getTime();
+
+export const listNotes = async (req, res) => {
   try {
-    const [s3Notes, legacyNotes] = await Promise.all([
-      s3Storage.listNoteRecords(),
-      Note.find({
-        visibility: { $ne: "private" },
-        uploadStatus: { $ne: "deleting" },
-      })
-        .sort({ createdAt: -1 })
-        .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
-    ]);
-    const notes = [
-      ...s3Notes.filter(
-        (note) => note.visibility !== "private" && note.uploadStatus !== "deleting"
-      ),
-      ...legacyNotes,
-    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const requestedPage = Number.parseInt(req.query?.page, 10);
+    const requestedLimit = Number.parseInt(req.query?.limit, 10);
+    const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+    const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+      ? Math.min(requestedLimit, 30)
+      : 30;
+    const offset = (page - 1) * limit;
+    const filters = {
+      q: typeof req.query?.q === "string" ? req.query.q.trim() : "",
+      university: typeof req.query?.university === "string" ? req.query.university.trim() : "",
+      course: typeof req.query?.course === "string" ? req.query.course.trim() : "",
+      subject: typeof req.query?.subject === "string" ? req.query.subject.trim() : "",
+      studyType: typeof req.query?.studyType === "string" ? req.query.studyType.trim() : "",
+      year: typeof req.query?.year === "string" ? req.query.year.trim() : "",
+    };
+    const hasFilters = Object.values(filters).some(Boolean);
+    const publicNotesQuery = {
+      visibility: { $ne: "private" },
+      uploadStatus: { $ne: "deleting" },
+    };
+
+    let notes;
+    let total;
+    if (hasFilters) {
+      const [s3Notes, legacyNotes] = await Promise.all([
+        s3Storage.listNoteRecords(),
+        Note.find(publicNotesQuery)
+          .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
+      ]);
+      const matchingNotes = [
+        ...s3Notes.filter(
+          (note) => note.visibility !== "private" &&
+            note.uploadStatus !== "deleting" &&
+            noteMatchesFilters(note, filters)
+        ),
+        ...legacyNotes.filter((note) => noteMatchesFilters(note, filters)),
+      ].sort(compareNotesByCreatedAt);
+      total = matchingNotes.length;
+      notes = matchingNotes.slice(offset, offset + limit);
+    } else {
+      const [s3Page, legacyNotes, legacyTotal] = await Promise.all([
+        s3Storage.listNoteRecordPage({ offset, limit }),
+        Note.find(publicNotesQuery)
+          .sort({ createdAt: -1 })
+          .skip(offset)
+          .limit(limit)
+          .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
+        Note.countDocuments(publicNotesQuery),
+      ]);
+      notes = [
+        ...s3Page.records.filter(
+          (note) => note.visibility !== "private" && note.uploadStatus !== "deleting"
+        ),
+        ...legacyNotes,
+      ].sort(compareNotesByCreatedAt).slice(0, limit);
+      total = s3Page.total + legacyTotal;
+    }
 
     res.json({
       success: true,
       notes: notes.map((note) => serializeNote(note)),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
     });
   } catch {
     logError("notes.list_failed");

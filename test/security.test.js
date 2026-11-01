@@ -390,7 +390,8 @@ test("upload validation checks file contents against the declared type", () => {
 
 test("shared note responses omit storage and ownership internals", async () => {
   const originalFind = Note.find;
-  const originalListNoteRecords = s3Storage.listNoteRecords;
+  const originalCountDocuments = Note.countDocuments;
+  const originalListNoteRecordPage = s3Storage.listNoteRecordPage;
   let query;
   const publicNote = {
     id: "note-id",
@@ -423,18 +424,26 @@ test("shared note responses omit storage and ownership internals", async () => {
       sort() {
         return this;
       },
+      skip() {
+        return this;
+      },
+      limit() {
+        return this;
+      },
       select() {
         return Promise.resolve([publicNote]);
       },
     };
   };
-  s3Storage.listNoteRecords = async () => [];
+  Note.countDocuments = async () => 1;
+  s3Storage.listNoteRecordPage = async () => ({ records: [], total: 0 });
 
   try {
     await listNotes({}, response);
   } finally {
     Note.find = originalFind;
-    s3Storage.listNoteRecords = originalListNoteRecords;
+    Note.countDocuments = originalCountDocuments;
+    s3Storage.listNoteRecordPage = originalListNoteRecordPage;
   }
 
   assert.equal(responseBody.success, true);
@@ -452,16 +461,25 @@ test("shared note responses omit storage and ownership internals", async () => {
 
 test("public listings include S3-only note records and exclude private notes", async () => {
   const originalFind = Note.find;
-  const originalListNoteRecords = s3Storage.listNoteRecords;
+  const originalCountDocuments = Note.countDocuments;
+  const originalListNoteRecordPage = s3Storage.listNoteRecordPage;
   const publicId = "imported notes 2024";
   Note.find = () => ({
     sort() {
       return this;
     },
+    skip() {
+      return this;
+    },
+    limit() {
+      return this;
+    },
     select: async () => [],
   });
-  s3Storage.listNoteRecords = async () => [
-    {
+  Note.countDocuments = async () => 0;
+  s3Storage.listNoteRecordPage = async () => ({
+    total: 2,
+    records: [{
       _id: publicId,
       title: "S3-only note",
       fileName: "lecture.pdf",
@@ -478,15 +496,16 @@ test("public listings include S3-only note records and exclude private notes", a
       fileName: "private.pdf",
       visibility: "private",
       uploadStatus: "active",
-    },
-  ];
+    }],
+  });
   let responseBody;
 
   try {
     await listNotes({}, { json: (body) => { responseBody = body; } });
   } finally {
     Note.find = originalFind;
-    s3Storage.listNoteRecords = originalListNoteRecords;
+    Note.countDocuments = originalCountDocuments;
+    s3Storage.listNoteRecordPage = originalListNoteRecordPage;
   }
 
   assert.equal(responseBody.notes.length, 1);
@@ -498,7 +517,8 @@ test("public listings include S3-only note records and exclude private notes", a
 
 test("unauthenticated requests can load the public notes list", async () => {
   const originalFind = Note.find;
-  const originalListNoteRecords = s3Storage.listNoteRecords;
+  const originalCountDocuments = Note.countDocuments;
+  const originalListNoteRecordPage = s3Storage.listNoteRecordPage;
   const publicNote = {
     id: "public-note-id",
     title: "Public notes",
@@ -511,9 +531,16 @@ test("unauthenticated requests can load the public notes list", async () => {
     sort() {
       return this;
     },
+    skip() {
+      return this;
+    },
+    limit() {
+      return this;
+    },
     select: async () => [publicNote],
   });
-  s3Storage.listNoteRecords = async () => [];
+  Note.countDocuments = async () => 1;
+  s3Storage.listNoteRecordPage = async () => ({ records: [], total: 0 });
 
   const app = express();
   app.use("/api/notes", notesRoutes);
@@ -533,7 +560,8 @@ test("unauthenticated requests can load the public notes list", async () => {
     assert.equal(responseBody.notes[0].title, "Public notes");
   } finally {
     Note.find = originalFind;
-    s3Storage.listNoteRecords = originalListNoteRecords;
+    Note.countDocuments = originalCountDocuments;
+    s3Storage.listNoteRecordPage = originalListNoteRecordPage;
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
@@ -565,6 +593,59 @@ test("public note statistics return counts only", async () => {
     stats: { total: 3, universities: 1, studyTypes: 2 },
   });
   assert.equal("notes" in responseBody, false);
+});
+
+test("public note listing requests one page from S3 and MongoDB", async () => {
+  const originals = {
+    find: Note.find,
+    countDocuments: Note.countDocuments,
+    listNoteRecordPage: s3Storage.listNoteRecordPage,
+  };
+  let s3PageRequest;
+  let mongoSkip;
+  const notes = Array.from({ length: 30 }, (_, index) => ({
+    _id: `note-${index}`,
+    title: `Note ${index}`,
+    fileName: `note-${index}.pdf`,
+    createdAt: new Date(2026, 0, 30 - index),
+  }));
+  Note.find = () => ({
+    sort() {
+      return this;
+    },
+    skip(value) {
+      mongoSkip = value;
+      return this;
+    },
+    limit() {
+      return this;
+    },
+    select: async () => notes,
+  });
+  Note.countDocuments = async () => 90;
+  s3Storage.listNoteRecordPage = async (request) => {
+    s3PageRequest = request;
+    return { records: [], total: 0 };
+  };
+  let responseBody;
+
+  try {
+    await listNotes(
+      { query: { page: "2", limit: "50" } },
+      { json: (body) => { responseBody = body; } }
+    );
+  } finally {
+    Note.find = originals.find;
+    Note.countDocuments = originals.countDocuments;
+    s3Storage.listNoteRecordPage = originals.listNoteRecordPage;
+  }
+
+  assert.deepEqual(s3PageRequest, { offset: 30, limit: 30 });
+  assert.equal(mongoSkip, 30);
+  assert.equal(responseBody.notes.length, 30);
+  assert.equal(responseBody.pagination.page, 2);
+  assert.equal(responseBody.pagination.limit, 30);
+  assert.equal(responseBody.pagination.total, 90);
 });
 
 test("note deletion is scoped to the authenticated owner", async () => {
@@ -889,6 +970,110 @@ test("note records list from current and legacy metadata prefixes", async () => 
   assert.deepEqual(listedPrefixes, ["metadata/", "notes/metadata/"]);
   assert.ok(fetchedKeys.includes(`metadata/${legacyId}.json`));
   assert.ok(fetchedKeys.includes(`notes/metadata/${legacyId}.json`));
+});
+
+test("S3 note page reads only the requested metadata records", async () => {
+  const savedEnvironment = {
+    AWS_REGION: process.env.AWS_REGION,
+    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+  const originalSend = S3Client.prototype.send;
+  const ids = Array.from({ length: 75 }, (_, index) => `paged-note-${index}`);
+  const fetchedIds = [];
+  process.env.AWS_REGION = "ap-south-1";
+  process.env.AWS_S3_BUCKET = "notes-test-bucket";
+  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
+  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  S3Client.prototype.send = async (command) => {
+    if (command instanceof ListObjectsV2Command) {
+      return {
+        Contents: command.input.Prefix === "metadata/"
+          ? ids.map((id, index) => ({
+              Key: `metadata/${id}.json`,
+              LastModified: new Date(2026, 0, index + 1),
+            }))
+          : [],
+      };
+    }
+    if (command instanceof GetObjectCommand) {
+      const id = command.input.Key.slice("metadata/".length, -".json".length);
+      fetchedIds.push(id);
+      return {
+        Body: {
+          transformToString: async () => JSON.stringify({ _id: id, title: id }),
+        },
+      };
+    }
+    throw new Error("Unexpected S3 command");
+  };
+
+  try {
+    const result = await s3Storage.listNoteRecordPage({ offset: 30, limit: 30 });
+    assert.equal(result.total, 75);
+    assert.equal(result.records.length, 30);
+    assert.equal(fetchedIds.length, 30);
+    assert.equal(result.records[0]._id, "paged-note-44");
+    assert.equal(result.records[29]._id, "paged-note-15");
+  } finally {
+    S3Client.prototype.send = originalSend;
+    for (const [name, value] of Object.entries(savedEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("note records are fetched concurrently with a bounded number of S3 requests", async () => {
+  const savedEnvironment = {
+    AWS_REGION: process.env.AWS_REGION,
+    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+  const originalSend = S3Client.prototype.send;
+  const ids = Array.from({ length: 30 }, (_, index) => `note-${index}`);
+  let activeRequests = 0;
+  let maxConcurrentRequests = 0;
+  process.env.AWS_REGION = "ap-south-1";
+  process.env.AWS_S3_BUCKET = "notes-test-bucket";
+  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
+  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  S3Client.prototype.send = async (command) => {
+    if (command instanceof ListObjectsV2Command) {
+      return {
+        Contents: command.input.Prefix === "metadata/"
+          ? ids.map((id) => ({ Key: `metadata/${id}.json` }))
+          : [],
+      };
+    }
+    if (command instanceof GetObjectCommand) {
+      activeRequests += 1;
+      maxConcurrentRequests = Math.max(maxConcurrentRequests, activeRequests);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      activeRequests -= 1;
+      return {
+        Body: {
+          transformToString: async () => JSON.stringify({ _id: command.input.Key }),
+        },
+      };
+    }
+    throw new Error("Unexpected S3 command");
+  };
+
+  try {
+    const records = await s3Storage.listNoteRecords();
+    assert.equal(records.length, ids.length);
+    assert.ok(maxConcurrentRequests > 1);
+    assert.ok(maxConcurrentRequests <= 25);
+  } finally {
+    S3Client.prototype.send = originalSend;
+    for (const [name, value] of Object.entries(savedEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
 
 test("S3 upload verification checks size, MIME, encryption, and file signature", async () => {

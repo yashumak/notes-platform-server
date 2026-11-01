@@ -14,6 +14,7 @@ export const DOWNLOAD_URL_TTL_SECONDS = 120;
 const SIGNATURE_CHECK_BYTES = 4096;
 const NOTE_METADATA_PREFIX = "metadata/";
 const LEGACY_NOTE_METADATA_PREFIX = "notes/metadata/";
+const NOTE_METADATA_READ_CONCURRENCY = 25;
 const NOTE_ID_PATTERN =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[a-z0-9 -]{1,220})$/i;
 
@@ -33,6 +34,39 @@ const getStorageConfig = () => {
     configuredRegion = region;
   }
   return { client, bucket };
+};
+
+const listNoteRecordEntries = async () => {
+  const { client: s3Client, bucket } = getStorageConfig();
+  const entriesByPrefix = await Promise.all(
+    [NOTE_METADATA_PREFIX, LEGACY_NOTE_METADATA_PREFIX].map(async (prefix) => {
+      const prefixEntries = [];
+      let continuationToken;
+      do {
+        const page = await s3Client.send(
+          new ListObjectsV2Command({
+            Bucket: bucket,
+            Prefix: prefix,
+            ContinuationToken: continuationToken,
+          })
+        );
+        for (const object of page.Contents || []) {
+          const id = object.Key?.slice(prefix.length).replace(/\.json$/, "");
+          if (!id || !NOTE_ID_PATTERN.test(id)) continue;
+          const lastModified = object.LastModified ? new Date(object.LastModified).getTime() : 0;
+          prefixEntries.push({ id, lastModified });
+        }
+        continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+      } while (continuationToken);
+      return prefixEntries;
+    })
+  );
+  const entries = new Map();
+  for (const entry of entriesByPrefix.flat()) {
+    const existing = entries.get(entry.id);
+    if (!existing || entry.lastModified > existing.lastModified) entries.set(entry.id, entry);
+  }
+  return [...entries.values()].sort((first, second) => second.lastModified - first.lastModified);
 };
 
 const formatContentDisposition = (fileName) => {
@@ -181,30 +215,24 @@ export const s3Storage = {
   },
 
   async listNoteRecords() {
-    const { client: s3Client, bucket } = getStorageConfig();
+    const entries = await listNoteRecordEntries();
     const records = [];
-    const seenIds = new Set();
-    for (const prefix of [NOTE_METADATA_PREFIX, LEGACY_NOTE_METADATA_PREFIX]) {
-      let continuationToken;
-      do {
-        const page = await s3Client.send(
-          new ListObjectsV2Command({
-            Bucket: bucket,
-            Prefix: prefix,
-            ContinuationToken: continuationToken,
-          })
-        );
-        for (const object of page.Contents || []) {
-          const id = object.Key?.slice(prefix.length).replace(/\.json$/, "");
-          if (!id || !NOTE_ID_PATTERN.test(id) || seenIds.has(id)) continue;
-          seenIds.add(id);
-          const note = await this.getNoteRecord(id);
-          if (note) records.push(note);
-        }
-        continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-      } while (continuationToken);
+    for (let index = 0; index < entries.length; index += NOTE_METADATA_READ_CONCURRENCY) {
+      const batch = entries.slice(index, index + NOTE_METADATA_READ_CONCURRENCY);
+      const notes = await Promise.all(batch.map(({ id }) => this.getNoteRecord(id)));
+      records.push(...notes.filter(Boolean));
     }
     return records;
+  },
+
+  async listNoteRecordPage({ offset, limit }) {
+    const entries = await listNoteRecordEntries();
+    const page = entries.slice(offset, offset + limit);
+    const records = await Promise.all(page.map(({ id }) => this.getNoteRecord(id)));
+    return {
+      records: records.filter(Boolean),
+      total: entries.length,
+    };
   },
 
   async deleteNoteRecord(id) {
