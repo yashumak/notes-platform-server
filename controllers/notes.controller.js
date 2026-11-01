@@ -91,19 +91,42 @@ const verifyUploadToken = (token, userId) => {
 
 const isStorageConfigurationError = (error) => error?.code === "S3_CONFIGURATION_MISSING";
 
+const logNotesOperationFailure = (operation, error) => {
+  const errorName =
+    typeof error?.name === "string" && /^[a-zA-Z0-9_-]{1,60}$/.test(error.name)
+      ? error.name
+      : "UnknownError";
+  const errorCode =
+    (typeof error?.code === "string" || typeof error?.code === "number") &&
+    /^[a-zA-Z0-9_-]{1,60}$/.test(String(error.code))
+      ? String(error.code)
+      : "NoCode";
+  const status = Number.isInteger(error?.$metadata?.httpStatusCode)
+    ? `.${error.$metadata.httpStatusCode}`
+    : "";
+  logError(`${operation}.${errorName}.${errorCode}${status}`);
+};
+
+const observeNotesOperation = (operation, promise) =>
+  promise.catch((error) => {
+    logNotesOperationFailure(operation, error);
+    throw error;
+  });
+
 export const getNoteStats = async (_req, res) => {
   try {
-    const s3Notes = (await s3Storage.listNoteRecords()).filter(
-      (note) => note.visibility !== "private" && note.uploadStatus !== "deleting"
-    );
+    const s3Notes = (await observeNotesOperation(
+      "notes.stats_s3_list_failed",
+      s3Storage.listNoteRecords()
+    )).filter((note) => note.visibility !== "private" && note.uploadStatus !== "deleting");
     const sharedNotes = {
       visibility: { $ne: "private" },
       uploadStatus: { $ne: "deleting" },
     };
     const [legacyTotal, universities, studyTypes] = await Promise.all([
-      Note.countDocuments(sharedNotes),
-      Note.distinct("university", sharedNotes),
-      Note.distinct("studyType", sharedNotes),
+      observeNotesOperation("notes.stats_mongo_count_failed", Note.countDocuments(sharedNotes)),
+      observeNotesOperation("notes.stats_mongo_universities_failed", Note.distinct("university", sharedNotes)),
+      observeNotesOperation("notes.stats_mongo_study_types_failed", Note.distinct("studyType", sharedNotes)),
     ]);
 
     res.json({
@@ -120,8 +143,8 @@ export const getNoteStats = async (_req, res) => {
         ]).size,
       },
     });
-  } catch {
-    logError("notes.stats_failed");
+  } catch (error) {
+    logNotesOperationFailure("notes.stats_failed", error);
     res.status(500).json({ message: "Could not load note statistics" });
   }
 };
@@ -344,9 +367,10 @@ export const listNotes = async (req, res) => {
     let total;
     if (hasFilters) {
       const [s3Notes, legacyNotes] = await Promise.all([
-        s3Storage.listNoteRecords(),
-        Note.find(publicNotesQuery)
+        observeNotesOperation("notes.list_s3_failed", s3Storage.listNoteRecords()),
+        observeNotesOperation("notes.list_mongo_failed", Note.find(publicNotesQuery)
           .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
+        ),
       ]);
       const matchingNotes = [
         ...s3Notes.filter(
@@ -360,13 +384,13 @@ export const listNotes = async (req, res) => {
       notes = matchingNotes.slice(offset, offset + limit);
     } else {
       const [s3Page, legacyNotes, legacyTotal] = await Promise.all([
-        s3Storage.listNoteRecordPage({ offset, limit }),
-        Note.find(publicNotesQuery)
+        observeNotesOperation("notes.list_s3_failed", s3Storage.listNoteRecordPage({ offset, limit })),
+        observeNotesOperation("notes.list_mongo_page_failed", Note.find(publicNotesQuery)
           .sort({ createdAt: -1 })
           .skip(offset)
           .limit(limit)
-          .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
-        Note.countDocuments(publicNotesQuery),
+          .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt")),
+        observeNotesOperation("notes.list_mongo_count_failed", Note.countDocuments(publicNotesQuery)),
       ]);
       notes = [
         ...s3Page.records.filter(
@@ -387,8 +411,8 @@ export const listNotes = async (req, res) => {
         totalPages: Math.ceil(total / limit),
       },
     });
-  } catch {
-    logError("notes.list_failed");
+  } catch (error) {
+    logNotesOperationFailure("notes.list_failed", error);
     res.status(500).json({ message: "Could not load notes" });
   }
 };
