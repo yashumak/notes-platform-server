@@ -595,6 +595,33 @@ test("public note statistics return counts only", async () => {
   assert.equal("notes" in responseBody, false);
 });
 
+test("public note listing reports missing S3 configuration as unavailable", async () => {
+  const savedBucket = process.env.AWS_S3_BUCKET;
+  delete process.env.AWS_S3_BUCKET;
+  let responseStatus;
+  let responseBody;
+  const response = {
+    status(status) {
+      responseStatus = status;
+      return this;
+    },
+    json(body) {
+      responseBody = body;
+      return this;
+    },
+  };
+
+  try {
+    await listNotes({ query: {} }, response);
+  } finally {
+    if (savedBucket === undefined) delete process.env.AWS_S3_BUCKET;
+    else process.env.AWS_S3_BUCKET = savedBucket;
+  }
+
+  assert.equal(responseStatus, 503);
+  assert.deepEqual(responseBody, { message: "Notes storage is not configured" });
+});
+
 test("public note listing requests one page from S3 and MongoDB", async () => {
   const originals = {
     find: Note.find,

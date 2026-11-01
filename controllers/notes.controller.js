@@ -145,7 +145,11 @@ export const getNoteStats = async (_req, res) => {
     });
   } catch (error) {
     logNotesOperationFailure("notes.stats_failed", error);
-    res.status(500).json({ message: "Could not load note statistics" });
+    res.status(isStorageConfigurationError(error) ? 503 : 500).json({
+      message: isStorageConfigurationError(error)
+        ? "Notes storage is not configured"
+        : "Could not load note statistics",
+    });
   }
 };
 
@@ -413,7 +417,11 @@ export const listNotes = async (req, res) => {
     });
   } catch (error) {
     logNotesOperationFailure("notes.list_failed", error);
-    res.status(500).json({ message: "Could not load notes" });
+    res.status(isStorageConfigurationError(error) ? 503 : 500).json({
+      message: isStorageConfigurationError(error)
+        ? "Notes storage is not configured"
+        : "Could not load notes",
+    });
   }
 };
 

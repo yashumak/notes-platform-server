@@ -23,6 +23,8 @@ import connectDB from "./config/db.js";
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+app.set("trust proxy", 1);
+
 if (!process.env.JWT_SECRET || Buffer.byteLength(process.env.JWT_SECRET) < 32) {
   logError("startup.jwt_secret_missing_or_weak");
   process.exit(1);
