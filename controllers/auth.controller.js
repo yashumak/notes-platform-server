@@ -203,6 +203,8 @@ export const verifyUser = async (req, res) => {
     return res.status(401).json({ isAuthenticated: false, message: "Not authenticated" });
   }
 
+  const userId = await ensureUserId(user);
+
   if (
     user.profilePhotoFileId ||
     user.profilePhotoS3Key?.startsWith(LEGACY_PROFILE_PHOTO_PREFIX)
@@ -218,6 +220,7 @@ export const verifyUser = async (req, res) => {
     isAuthenticated: true,
     expiresAt,
     user: {
+      id: userId,
       name: user.name,
       email: user.email,
       university: user.university,

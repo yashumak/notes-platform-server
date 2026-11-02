@@ -278,10 +278,12 @@ test("unauthenticated protected requests are rejected", () => {
   assert.deepEqual(responseBody, { message: "Unauthorized: No token provided" });
 });
 
-test("session verification returns profile fields without exposing the user ID", async () => {
+test("session verification returns the authenticated user ID for private cache isolation", async () => {
   const originalFindById = User.findById;
   const user = {
     id: "private-user-id",
+    _id: "private-user-id",
+    user_id: "1234567890",
     name: "Test User",
     email: "test@example.com",
     university: "Example University",
@@ -302,7 +304,7 @@ test("session verification returns profile fields without exposing the user ID",
   }
 
   assert.equal(responseBody.user.email, user.email);
-  assert.equal("id" in responseBody.user, false);
+  assert.equal(responseBody.user.id, user.user_id);
 });
 
 test("session verification migrates an existing GridFS profile photo to S3", async () => {
