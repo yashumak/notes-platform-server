@@ -26,6 +26,7 @@ import {
   deleteMyNote,
   downloadNoteFile,
   getNoteStats,
+  listMyNotes,
   listNotes,
 } from "../controllers/notes.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
@@ -919,15 +920,17 @@ test("new note records use the root metadata prefix", async () => {
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
   };
   const originalSend = S3Client.prototype.send;
-  let uploadedCommand;
+  const uploadedCommands = [];
+  const ownerId = new mongoose.Types.ObjectId().toString();
+  const noteId = "7c78e950-3026-4fef-8290-0e4508aa2718";
   process.env.AWS_REGION = "ap-south-1";
   process.env.AWS_S3_BUCKET = "notes-test-bucket";
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
-  S3Client.prototype.send = async (command) => { uploadedCommand = command; };
+  S3Client.prototype.send = async (command) => { uploadedCommands.push(command); };
 
   try {
-    await s3Storage.putNoteRecord({ _id: "course-notes-1234567890" });
+    await s3Storage.putNoteRecord({ _id: noteId, uploadedBy: ownerId });
   } finally {
     S3Client.prototype.send = originalSend;
     for (const [name, value] of Object.entries(savedEnvironment)) {
@@ -936,8 +939,150 @@ test("new note records use the root metadata prefix", async () => {
     }
   }
 
-  assert.ok(uploadedCommand instanceof PutObjectCommand);
-  assert.equal(uploadedCommand.input.Key, "metadata/course-notes-1234567890.json");
+  assert.equal(uploadedCommands.length, 2);
+  assert.ok(uploadedCommands.every((command) => command instanceof PutObjectCommand));
+  assert.equal(uploadedCommands[0].input.Key, `metadata/${noteId}.json`);
+  assert.equal(
+    uploadedCommands[1].input.Key,
+    `metadata/users/${ownerId}/${noteId}.json`
+  );
+  assert.deepEqual(JSON.parse(uploadedCommands[1].input.Body.toString()), { _id: noteId });
+});
+
+test("user note index reads only that account's indexed note records", async () => {
+  const savedEnvironment = {
+    AWS_REGION: process.env.AWS_REGION,
+    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+  const originalSend = S3Client.prototype.send;
+  const ownerId = new mongoose.Types.ObjectId().toString();
+  const noteId = "7c78e950-3026-4fef-8290-0e4508aa2718";
+  const listedPrefixes = [];
+  const fetchedKeys = [];
+  process.env.AWS_REGION = "ap-south-1";
+  process.env.AWS_S3_BUCKET = "notes-test-bucket";
+  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
+  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  S3Client.prototype.send = async (command) => {
+    if (command instanceof ListObjectsV2Command) {
+      listedPrefixes.push(command.input.Prefix);
+      return { Contents: [{ Key: `${command.input.Prefix}${noteId}.json` }] };
+    }
+    if (command instanceof GetObjectCommand) {
+      fetchedKeys.push(command.input.Key);
+      return {
+        Body: {
+          transformToString: async () => JSON.stringify({
+            _id: noteId,
+            title: "My upload",
+            uploadedBy: ownerId,
+            visibility: "private",
+          }),
+        },
+      };
+    }
+    throw new Error("Unexpected S3 command");
+  };
+
+  try {
+    const records = await s3Storage.listNoteRecordsForUser({ uploadedBy: ownerId });
+    assert.equal(records.length, 1);
+    assert.equal(records[0].uploadedBy, ownerId);
+  } finally {
+    S3Client.prototype.send = originalSend;
+    for (const [name, value] of Object.entries(savedEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  assert.deepEqual(listedPrefixes, [`metadata/users/${ownerId}/`]);
+  assert.deepEqual(fetchedKeys, [`metadata/${noteId}.json`]);
+});
+
+test("dashboard note listing uses the account index instead of scanning all notes", async () => {
+  const originalFindById = User.findById;
+  const originalFind = Note.find;
+  const originalListUserRecords = s3Storage.listNoteRecordsForUser;
+  const originalListAllRecords = s3Storage.listNoteRecords;
+  const ownerId = new mongoose.Types.ObjectId().toString();
+  const records = [
+    { _id: "note-one", uploadedBy: ownerId, title: "First", createdAt: "2026-01-02" },
+    { _id: "note-two", uploadedBy: ownerId, title: "Second", createdAt: "2026-01-01" },
+  ];
+  let listedOwner;
+  let responseBody;
+  User.findById = () => ({ select: async () => ({ notesIndexInitialized: true }) });
+  Note.find = () => ({
+    sort() { return this; },
+    select: async () => [],
+  });
+  s3Storage.listNoteRecordsForUser = async ({ uploadedBy }) => {
+    listedOwner = uploadedBy;
+    return records;
+  };
+  s3Storage.listNoteRecords = async () => assert.fail("Dashboard must not scan every S3 note");
+
+  try {
+    await listMyNotes(
+      { user: { id: ownerId } },
+      { json(body) { responseBody = body; return this; } }
+    );
+  } finally {
+    User.findById = originalFindById;
+    Note.find = originalFind;
+    s3Storage.listNoteRecordsForUser = originalListUserRecords;
+    s3Storage.listNoteRecords = originalListAllRecords;
+  }
+
+  assert.equal(listedOwner, ownerId);
+  assert.deepEqual(responseBody.notes.map(({ title }) => title), ["First", "Second"]);
+});
+
+test("dashboard note listing caches a user's legacy S3 records once", async () => {
+  const originalFindById = User.findById;
+  const originalUpdateOne = User.updateOne;
+  const originalFind = Note.find;
+  const originalListRecords = s3Storage.listNoteRecords;
+  const originalPutUserIndex = s3Storage.putUserNoteIndex;
+  const ownerId = new mongoose.Types.ObjectId().toString();
+  const userNote = { _id: "legacy-note", uploadedBy: ownerId, title: "Legacy upload" };
+  const foreignNote = { _id: "other-note", uploadedBy: new mongoose.Types.ObjectId().toString() };
+  let indexedNotes = [];
+  let initializedAccount;
+  let responseBody;
+  User.findById = () => ({ select: async () => ({ notesIndexInitialized: false }) });
+  User.updateOne = async (filter, update) => {
+    initializedAccount = { filter, update };
+  };
+  Note.find = () => ({
+    sort() { return this; },
+    select: async () => [],
+  });
+  s3Storage.listNoteRecords = async () => [userNote, foreignNote];
+  s3Storage.putUserNoteIndex = async (note) => indexedNotes.push(note);
+
+  try {
+    await listMyNotes(
+      { user: { id: ownerId } },
+      { json(body) { responseBody = body; return this; } }
+    );
+  } finally {
+    User.findById = originalFindById;
+    User.updateOne = originalUpdateOne;
+    Note.find = originalFind;
+    s3Storage.listNoteRecords = originalListRecords;
+    s3Storage.putUserNoteIndex = originalPutUserIndex;
+  }
+
+  assert.deepEqual(indexedNotes, [userNote]);
+  assert.deepEqual(initializedAccount, {
+    filter: { _id: ownerId },
+    update: { $set: { notesIndexInitialized: true } },
+  });
+  assert.deepEqual(responseBody.notes.map(({ title }) => title), ["Legacy upload"]);
 });
 
 test("note records list from current and legacy metadata prefixes", async () => {
@@ -1223,36 +1368,69 @@ test("S3 download URLs expire quickly and preserve a safe original filename", as
   }
 });
 
-test("upload validation checks extension, MIME type, size, and file signature", () => {
-  assert.equal(
-    validateFileMetadata({
-      fileName: "../../notes.pdf",
-      contentType: "application/pdf",
-      fileSize: 10,
-    }).safeName,
-    "notes.pdf"
-  );
-  assert.equal(
-    validateFileMetadata({
-      fileName: "notes.pdf",
-      contentType: "image/png",
-      fileSize: 10,
-    }).valid,
-    false
-  );
+test("upload validation supports every file type when mobile MIME metadata is unavailable", () => {
+  const supportedFiles = [
+    ["notes.pdf", "application/pdf", Buffer.from("%PDF-test")],
+    ["notes.doc", "application/msword", Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])],
+    ["notes.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", Buffer.from([0x50, 0x4b, 0x03, 0x04])],
+    ["notes.ppt", "application/vnd.ms-powerpoint", Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])],
+    ["notes.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", Buffer.from([0x50, 0x4b, 0x03, 0x04])],
+    ["notes.xls", "application/vnd.ms-excel", Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])],
+    ["notes.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Buffer.from([0x50, 0x4b, 0x03, 0x04])],
+    ["notes.txt", "text/plain", Buffer.from("notes")],
+    ["notes.csv", "text/csv", Buffer.from("a,b")],
+    ["notes.md", "text/markdown", Buffer.from("# notes")],
+    ["notes.json", "application/json", Buffer.from("{}")],
+    ["notes.xml", "application/xml", Buffer.from("<a/>")],
+    ["notes.jpg", "image/jpeg", Buffer.from([0xff, 0xd8, 0xff])],
+    ["notes.png", "image/png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    ["notes.gif", "image/gif", Buffer.from("GIF89a")],
+    ["notes.webp", "image/webp", Buffer.from("RIFF1234WEBP")],
+  ];
+
+  for (const [fileName, expectedContentType, buffer] of supportedFiles) {
+    const result = validateFileMetadata({
+      fileName,
+      contentType: "application/octet-stream",
+      fileSize: buffer.length,
+    });
+    assert.equal(result.valid, true, fileName);
+    assert.equal(result.contentType, expectedContentType, fileName);
+    assert.equal(
+      hasValidFileSignature({ buffer, contentType: result.contentType }),
+      true,
+      fileName
+    );
+  }
+
+  const sanitizedFile = validateFileMetadata({
+    fileName: "../../notes.pdf",
+    contentType: "",
+    fileSize: 10,
+  });
+  assert.equal(sanitizedFile.safeName, "notes.pdf");
+  assert.equal(sanitizedFile.contentType, "application/pdf");
+  assert.equal(validateFileMetadata({
+    fileName: "notes.unsupported",
+    contentType: "application/pdf",
+    fileSize: 10,
+  }).valid, false);
+  assert.equal(validateFileMetadata({
+    fileName: "notes.pdf",
+    contentType: "application/pdf",
+    fileSize: 0,
+  }).valid, false);
+  const invalidPdf = validateFileMetadata({
+    fileName: "notes.pdf",
+    contentType: "image/png",
+    fileSize: 22,
+  });
   assert.equal(
     hasValidFileSignature({
-      mimetype: "application/pdf",
       buffer: Buffer.from("<html>not a PDF</html>"),
+      contentType: invalidPdf.contentType,
     }),
     false
-  );
-  assert.equal(
-    hasValidFileSignature({
-      mimetype: "image/png",
-      buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    }),
-    true
   );
 });
 
@@ -2024,6 +2202,7 @@ test("registration stores a hash and only returns a generic success message", as
   assert.equal(createdUser.university, "Example University");
   assert.equal(createdUser.course, "Engineering");
   assert.equal(createdUser.year, "2026");
+  assert.equal(createdUser.notesIndexInitialized, true);
   assert.equal(await bcrypt.compare(submittedPassword, createdUser.password), true);
   assert.notEqual(createdUser.password, submittedPassword);
   assert.equal(jwt.verify(token, jwtSecret).id, userId.toString());

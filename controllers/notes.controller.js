@@ -242,6 +242,7 @@ export const completeNoteUpload = async (req, res) => {
       ) {
         return res.status(404).json({ message: "Note not found" });
       }
+      await s3Storage.putUserNoteIndex(existingNote);
       return res.status(200).json({
         success: true,
         message: "Note upload was already completed",
@@ -427,14 +428,33 @@ export const listNotes = async (req, res) => {
 
 export const listMyNotes = async (req, res) => {
   try {
-    const [s3Notes, legacyNotes] = await Promise.all([
-      s3Storage.listNoteRecords(),
-      Note.find({ uploadedBy: req.user.id })
-        .sort({ createdAt: -1 })
-        .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
-    ]);
+    const account = await User.findById(req.user.id).select("notesIndexInitialized");
+    if (!account) return res.status(404).json({ message: "User not found" });
+
+    let s3Notes;
+    if (account.notesIndexInitialized) {
+      s3Notes = await s3Storage.listNoteRecordsForUser({ uploadedBy: req.user.id });
+    } else {
+      const allNotes = await s3Storage.listNoteRecords();
+      s3Notes = allNotes.filter(
+        (note) => String(note.uploadedBy) === String(req.user.id)
+      );
+      await Promise.all(s3Notes.map((note) => s3Storage.putUserNoteIndex(note)));
+      await User.updateOne(
+        { _id: req.user.id },
+        { $set: { notesIndexInitialized: true } }
+      );
+    }
+
+    const legacyNotes = await Note.find({ uploadedBy: req.user.id })
+      .sort({ createdAt: -1 })
+      .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt");
     const notes = [
-      ...s3Notes.filter((note) => String(note.uploadedBy) === String(req.user.id)),
+      ...s3Notes.filter(
+        (note) =>
+          String(note.uploadedBy) === String(req.user.id) &&
+          note.uploadStatus !== "deleting"
+      ),
       ...legacyNotes,
     ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -442,8 +462,8 @@ export const listMyNotes = async (req, res) => {
       success: true,
       notes: notes.map((note) => serializeNote(note)),
     });
-  } catch {
-    logError("notes.user_list_failed");
+  } catch (error) {
+    logNotesOperationFailure("notes.user_list_failed", error);
     res.status(500).json({ message: "Could not load your notes" });
   }
 };
@@ -461,7 +481,7 @@ export const deleteMyNote = async (req, res) => {
       }
       await s3Storage.putNoteRecord({ ...s3Note, uploadStatus: "deleting" });
       await s3Storage.deleteObject(s3Note.s3Key);
-      await s3Storage.deleteNoteRecord(s3Note._id);
+      await s3Storage.deleteNoteRecord(s3Note._id, { uploadedBy: s3Note.uploadedBy });
       return res.json({ success: true, message: "Note deleted successfully" });
     }
 

@@ -70,14 +70,15 @@ export const sanitizeFileName = (fileName) => {
   return basename || "upload";
 };
 
-export const validateFileMetadata = ({ fileName, contentType, fileSize }) => {
+export const validateFileMetadata = ({ fileName, fileSize }) => {
   const safeName = sanitizeFileName(fileName);
   const extension = safeName.slice(safeName.lastIndexOf(".")).toLowerCase();
   const allowedMimeTypes = fileTypes.get(extension);
 
-  if (!allowedMimeTypes || !allowedMimeTypes.includes(contentType)) {
+  if (!allowedMimeTypes) {
     return { valid: false, message: "Unsupported file extension or MIME type" };
   }
+  const normalizedContentType = allowedMimeTypes[0];
   if (!Number.isSafeInteger(fileSize) || fileSize <= 0) {
     return { valid: false, message: "File size must be greater than zero" };
   }
@@ -90,7 +91,7 @@ export const validateFileMetadata = ({ fileName, contentType, fileSize }) => {
     };
   }
 
-  return { valid: true, safeName, contentType, fileSize };
+  return { valid: true, safeName, contentType: normalizedContentType, fileSize };
 };
 
 export const hasValidFileSignature = ({ buffer, mimetype, contentType = mimetype }) => {

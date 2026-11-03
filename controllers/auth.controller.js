@@ -129,7 +129,8 @@ export const registerUser = async (req, res) => {
           password: hashed,
           university,
           course,
-          year
+          year,
+          notesIndexInitialized: true,
         });
         break;
       } catch (error) {

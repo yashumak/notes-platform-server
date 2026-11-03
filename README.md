@@ -11,7 +11,10 @@ under `notes/metadata/` is also still read during the transition.
 New S3 keys use a normalized account name and 10-digit user ID for the folder,
 then a normalized note title and user ID followed by a unique UUID. For
 example: `notes/example-user-1234567890/course-notes-1234567890-<uuid>` and
-`metadata/course-notes-1234567890-<uuid>.json`. Profile photos use
+`metadata/course-notes-1234567890-<uuid>.json`. A private
+`metadata/users/<account-id>/` index lets dashboards retrieve only that
+account's uploads. Existing accounts are indexed during their first uploads
+listing; newly registered accounts use the index immediately. Profile photos use
 `photos/username-user_id`, for example `photos/jane-doe-1234567890`; replacing
 a photo updates that user's object.
 
@@ -54,13 +57,18 @@ following values:
 3. Enable default server-side encryption (SSE-S3/AES-256). Uploads also require
    the signed `x-amz-server-side-encryption: AES256` request header.
 4. Configure bucket CORS for the exact deployed frontend origin. For local
-   development, add `http://localhost:3000`; replace/add the production origin
-   as appropriate:
+   development, add `http://localhost:3000`. Add every exact production
+   frontend origin used by uploaders (for example, both `https://example.com`
+   and `https://www.example.com` if both are in use). Mobile browsers must use
+   one of these same allowed origins; do not include a trailing slash:
 
    ```json
    [
      {
-       "AllowedOrigins": ["http://localhost:3000"],
+       "AllowedOrigins": [
+         "http://localhost:3000",
+         "https://example.com"
+       ],
        "AllowedMethods": ["PUT"],
        "AllowedHeaders": ["*"],
        "ExposeHeaders": ["ETag"],
@@ -71,8 +79,10 @@ following values:
 
    Allowing request headers is necessary because the AWS SDK adds a signed
    checksum header to presigned uploads. Restrict `AllowedOrigins` to the exact
-   frontend origin; do not use `*` for origins. Add the deployed HTTPS origin
-   when deploying the frontend.
+   frontend origins; do not use `*` for origins. Add the deployed HTTPS origins
+   when deploying the frontend. A missing origin or request header permission
+   can make browsers report a network error for the direct S3 upload even when
+   the API request succeeded.
 
 5. Grant the backend identity only the following bucket listing and object
    operations. Replace the bucket name. Listing is restricted to current and

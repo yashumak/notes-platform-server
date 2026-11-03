@@ -14,6 +14,7 @@ export const DOWNLOAD_URL_TTL_SECONDS = 120;
 const SIGNATURE_CHECK_BYTES = 4096;
 const NOTE_METADATA_PREFIX = "metadata/";
 const LEGACY_NOTE_METADATA_PREFIX = "notes/metadata/";
+const USER_NOTE_INDEX_PREFIX = "metadata/users/";
 const NOTE_METADATA_READ_CONCURRENCY = 25;
 const NOTE_ID_PATTERN =
   /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[a-z0-9 -]{1,220})$/i;
@@ -82,6 +83,12 @@ const invalidUploadError = () => {
   const error = new Error("Uploaded file did not match its validated metadata");
   error.code = "INVALID_S3_UPLOAD";
   return error;
+};
+
+const getUserNoteIndexPrefix = (uploadedBy) => {
+  const ownerId = String(uploadedBy || "");
+  if (!/^[0-9a-f]{24}$/i.test(ownerId)) return null;
+  return `${USER_NOTE_INDEX_PREFIX}${ownerId}/`;
 };
 
 export const s3Storage = {
@@ -194,6 +201,57 @@ export const s3Storage = {
         ServerSideEncryption: "AES256",
       })
     );
+    await this.putUserNoteIndex(note);
+  },
+
+  async putUserNoteIndex(note) {
+    const prefix = getUserNoteIndexPrefix(note.uploadedBy);
+    const id = String(note._id || "");
+    if (!prefix || !NOTE_ID_PATTERN.test(id)) return;
+
+    const { client: s3Client, bucket } = getStorageConfig();
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: `${prefix}${id}.json`,
+        Body: JSON.stringify({ _id: id }),
+        ContentType: "application/json",
+        ServerSideEncryption: "AES256",
+      })
+    );
+  },
+
+  async listNoteRecordsForUser({ uploadedBy }) {
+    const prefix = getUserNoteIndexPrefix(uploadedBy);
+    if (!prefix) throw new Error("Invalid note owner ID");
+
+    const { client: s3Client, bucket } = getStorageConfig();
+    const ids = [];
+    let continuationToken;
+    do {
+      const page = await s3Client.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        })
+      );
+      for (const object of page.Contents || []) {
+        const id = object.Key?.slice(prefix.length).replace(/\.json$/, "");
+        if (id && NOTE_ID_PATTERN.test(id)) ids.push(id);
+      }
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    const records = [];
+    for (let index = 0; index < ids.length; index += NOTE_METADATA_READ_CONCURRENCY) {
+      const batch = ids.slice(index, index + NOTE_METADATA_READ_CONCURRENCY);
+      const notes = await Promise.all(batch.map((id) => this.getNoteRecord(id)));
+      records.push(
+        ...notes.filter((note) => note && String(note.uploadedBy) === String(uploadedBy))
+      );
+    }
+    return records;
   },
 
   async getNoteRecord(id) {
@@ -235,17 +293,26 @@ export const s3Storage = {
     };
   },
 
-  async deleteNoteRecord(id) {
+  async deleteNoteRecord(id, { uploadedBy } = {}) {
     if (typeof id !== "string" || !NOTE_ID_PATTERN.test(id)) {
       throw new Error("Invalid S3 note record ID");
     }
     const { client: s3Client, bucket } = getStorageConfig();
-    await Promise.all(
+    const deleteOperations = [
       [NOTE_METADATA_PREFIX, LEGACY_NOTE_METADATA_PREFIX].map((prefix) =>
         s3Client.send(
           new DeleteObjectCommand({ Bucket: bucket, Key: `${prefix}${id}.json` })
         )
-      )
-    );
+      ),
+    ];
+    const userIndexPrefix = getUserNoteIndexPrefix(uploadedBy);
+    if (userIndexPrefix) {
+      deleteOperations.push(
+        s3Client.send(
+          new DeleteObjectCommand({ Bucket: bucket, Key: `${userIndexPrefix}${id}.json` })
+        )
+      );
+    }
+    await Promise.all(deleteOperations.flat());
   },
 };

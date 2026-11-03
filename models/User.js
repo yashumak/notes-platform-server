@@ -15,6 +15,7 @@ const userSchema = new mongoose.Schema(
     profilePhotoS3Key: { type: String },
     profilePhotoFileId: { type: mongoose.Schema.Types.ObjectId },
     profilePhotoContentType: { type: String },
+    notesIndexInitialized: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
