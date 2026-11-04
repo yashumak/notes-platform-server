@@ -182,6 +182,15 @@ in-memory limit. Restrict Redis network access to the backend security group and
 use TLS/authentication where supported. In development, omitting `REDIS_URL`
 uses the process-local memory store.
 
+For Render, create a private Key Value instance in the same region as the
+backend, copy its **internal/private** Redis URL, and add it to the backend
+service as the `REDIS_URL` environment variable. Do not use a public URL for
+service-to-service traffic, and do not commit the URL. Save the environment
+change and redeploy. The startup logs distinguish a missing URL from a failed
+connection without printing the URL or credentials. If connection fails, check
+that the Key Value instance is available, both services are in the same region,
+and the URL is the private connection URL.
+
 `TRUST_PROXY_HOPS` controls Express's proxy trust setting used to derive client
 IP addresses. Set it to the exact number of trusted proxies in front of the
 backend (usually `1` for an application reachable only through one AWS ALB).

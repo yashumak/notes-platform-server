@@ -210,7 +210,9 @@ test("production refuses to run per-instance memory limits when Redis is missing
   process.env.NODE_ENV = "production";
   await assert.rejects(
     initializeRateLimitStore(),
-    /REDIS_URL is required in production/
+    (error) =>
+      error.code === "RATE_LIMIT_REDIS_URL_MISSING" &&
+      /REDIS_URL is required in production/.test(error.message)
   );
   process.env.NODE_ENV = "test";
 });

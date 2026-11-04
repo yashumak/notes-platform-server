@@ -63,10 +63,20 @@ const sendRedisCommand = async (...args) => {
 
 export const initializeRateLimitStore = async () => {
   if (process.env.NODE_ENV === "production" && !redisClient) {
-    throw new Error("REDIS_URL is required in production for shared rate limits");
+    const error = new Error("REDIS_URL is required in production for shared rate limits");
+    error.code = "RATE_LIMIT_REDIS_URL_MISSING";
+    throw error;
   }
   if (redisClient && !redisClient.isOpen) {
-    await redisClient.connect();
+    try {
+      await redisClient.connect();
+    } catch (cause) {
+      const error = new Error("Could not connect to the configured shared rate-limit store", {
+        cause,
+      });
+      error.code = "RATE_LIMIT_REDIS_CONNECTION_FAILED";
+      throw error;
+    }
     logInfo("rate_limit.redis_connected");
   }
 };

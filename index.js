@@ -106,8 +106,14 @@ const startServer = async () => {
     app.listen(PORT, () => {
       logInfo("server.started");
     });
-  } catch {
-    logError("startup.rate_limit_store_failed");
+  } catch (error) {
+    if (error.code === "RATE_LIMIT_REDIS_URL_MISSING") {
+      logError("startup.rate_limit_redis_url_missing.configure_render_key_value");
+    } else if (error.code === "RATE_LIMIT_REDIS_CONNECTION_FAILED") {
+      logError("startup.rate_limit_redis_connection_failed.check_private_url_and_network");
+    } else {
+      logError("startup.rate_limit_store_failed");
+    }
     process.exit(1);
   }
 };
