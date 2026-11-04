@@ -2,11 +2,14 @@
   "name": "backend",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "node --check index.js",
     "dev": "nodemon index.js",
     "start": "node index.js",
-    "test": "node --test test/security.test.js",
+    "test": "node --test test/*.test.js",
     "test:security": "node --test test/security.test.js"
   },
   "dependencies": {
@@ -25,7 +28,9 @@
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^7.0.0",
     "mongoose": "^9.0.0",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "rate-limit-redis": "^6.0.2",
+    "redis": "^6.3.1"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.28.5",

@@ -8,10 +8,12 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import { logError, logInfo } from "./utils/logger.js";
-import { isPublicNotesReadRequest } from "./utils/rateLimitPolicy.js";
 import { initializeAuthPayloadEncryption } from "./utils/authPayloadEncryption.js";
+import {
+  generalApiLimiter,
+  initializeRateLimitStore,
+} from "./middlewares/rateLimiters.js";
 
 // Routes
 import authRoutes from "./routes/auth.routes.js";
@@ -23,7 +25,13 @@ import connectDB from "./config/db.js";
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.set("trust proxy", 1);
+const configuredProxyHops = process.env.TRUST_PROXY_HOPS?.trim();
+const trustedProxyHops = configuredProxyHops ? Number(configuredProxyHops) : 1;
+if (!Number.isSafeInteger(trustedProxyHops) || trustedProxyHops < 0) {
+  logError("startup.trust_proxy_hops_invalid");
+  process.exit(1);
+}
+app.set("trust proxy", trustedProxyHops);
 
 if (!process.env.JWT_SECRET || Buffer.byteLength(process.env.JWT_SECRET) < 32) {
   logError("startup.jwt_secret_missing_or_weak");
@@ -41,9 +49,6 @@ try {
 connectDB();
 
 // ------------------ MIDDLEWARE ------------------
-app.use(express.json());
-app.use(cookieParser());
-
 app.use(
   cors({
     origin: process.env.FRONTEND_URL,
@@ -52,17 +57,9 @@ app.use(
 );
 
 app.use(helmet());
-
-// ------------------ RATE LIMIT ------------------
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000,
-  skip: isPublicNotesReadRequest,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: "Too many requests from this IP, please try again later",
-});
-app.use(limiter);
+app.use("/api", generalApiLimiter);
+app.use(express.json());
+app.use(cookieParser());
 
 // ------------------ ROUTES ------------------
 app.use("/api/auth", authRoutes);
@@ -74,6 +71,12 @@ app.use((_req, res) => {
 
 // ------------------ ERROR HANDLER ------------------
 app.use((err, _req, res, _next) => {
+  if (err.code === "RATE_LIMIT_STORE_UNAVAILABLE") {
+    logError("rate_limit.store_request_failed");
+    return res.status(503).json({
+      message: "Rate limiting is temporarily unavailable. Please try again later.",
+    });
+  }
   const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 500;
   const isUploadInputError =
     err.code === "LIMIT_FILE_SIZE" ||
@@ -97,6 +100,16 @@ app.use((err, _req, res, _next) => {
 });
 
 // ------------------ SERVER ------------------
-app.listen(PORT, () => {
-  logInfo("server.started");
-});
+const startServer = async () => {
+  try {
+    await initializeRateLimitStore();
+    app.listen(PORT, () => {
+      logInfo("server.started");
+    });
+  } catch {
+    logError("startup.rate_limit_store_failed");
+    process.exit(1);
+  }
+};
+
+startServer();

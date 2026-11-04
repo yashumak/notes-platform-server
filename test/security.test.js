@@ -44,7 +44,20 @@ import {
 import Note from "../models/Note.js";
 import User from "../models/User.js";
 import { ensureUserId, generateUserId } from "../utils/userId.js";
-import { isPublicNotesReadRequest } from "../utils/rateLimitPolicy.js";
+import {
+  hasNoteSearchCriteria,
+  isDedicatedRateLimitRequest,
+  isPublicNotesListRequest,
+} from "../utils/rateLimitPolicy.js";
+import {
+  loginAccountLimiter,
+  loginIpLimiter,
+  notesSearchLimiter,
+  notesUploadLimiter,
+  passwordChangeLimiter,
+  publicNotesListLimiter,
+  signupLimiter,
+} from "../middlewares/rateLimiters.js";
 import { decryptAuthPayload, getAuthPayloadPublicKey } from "../utils/authPayloadEncryption.js";
 import { s3Storage, UPLOAD_URL_TTL_SECONDS } from "../services/s3Storage.js";
 
@@ -196,22 +209,34 @@ test("notes reference their user by the schema-generated MongoDB ID", () => {
   assert.equal(uploadedBy.isRequired, true);
 });
 
-test("public notes reads use a separate rate-limit bucket from other API requests", () => {
-  assert.equal(isPublicNotesReadRequest({ method: "GET", path: "/api/notes" }), true);
-  assert.equal(isPublicNotesReadRequest({ method: "GET", path: "/api/notes/stats" }), true);
-  assert.equal(isPublicNotesReadRequest({ method: "POST", path: "/api/notes" }), false);
-  assert.equal(isPublicNotesReadRequest({ method: "GET", path: "/api/notes/123/file" }), false);
-  assert.equal(isPublicNotesReadRequest({ method: "GET", path: "/api/auth/verify" }), false);
+test("public notes listing and search have dedicated policies apart from general API traffic", () => {
+  const listingRequest = { method: "GET", originalUrl: "/api/notes" };
+  const statsRequest = { method: "GET", originalUrl: "/api/notes/stats" };
+  assert.equal(isPublicNotesListRequest(listingRequest), true);
+  assert.equal(isPublicNotesListRequest(statsRequest), false);
+  assert.equal(isDedicatedRateLimitRequest(listingRequest), true);
+  assert.equal(isDedicatedRateLimitRequest(statsRequest), false);
+  assert.equal(hasNoteSearchCriteria({ query: { q: "linear algebra" } }), true);
+  assert.equal(hasNoteSearchCriteria({ query: { q: ["linear algebra"] } }), true);
+  assert.equal(hasNoteSearchCriteria({ query: { page: "2", limit: "30" } }), false);
+  assert.equal(isDedicatedRateLimitRequest({ method: "GET", path: "/api/notes/123/file" }), false);
+  assert.equal(isDedicatedRateLimitRequest({ method: "GET", path: "/api/auth/verify" }), false);
 });
 
 test("upload APIs require authentication while shared note reads remain public", () => {
   const routes = authRoutes.stack
     .map((layer) => layer.route)
     .filter(Boolean);
+  const loginRoute = routes.find((route) => route.path === "/login");
+  const signupRoute = routes.find((route) => route.path === "/register");
   const changePasswordRoute = routes.find((route) => route.path === "/change-password");
 
+  assert.ok(loginRoute?.stack.some((layer) => layer.handle === loginIpLimiter));
+  assert.ok(loginRoute?.stack.some((layer) => layer.handle === loginAccountLimiter));
+  assert.ok(signupRoute?.stack.some((layer) => layer.handle === signupLimiter));
   assert.ok(changePasswordRoute);
   assert.ok(changePasswordRoute.stack.some((layer) => layer.handle === protect));
+  assert.ok(changePasswordRoute.stack.some((layer) => layer.handle === passwordChangeLimiter));
   assert.equal(routes.some((route) => route.path === "/forgot-password"), false);
 
   for (const path of ["/verify", "/profile/photo", "/profile", "/change-password"]) {
@@ -236,6 +261,11 @@ test("upload APIs require authentication while shared note reads remain public",
     assert.ok(route, `${path} note route should exist`);
     assert.ok(route.stack.some((layer) => layer.handle === protect), `${path} should require authentication`);
   }
+  const uploadPresignRoute = noteRoutes.find((route) => route.path === "/upload/presign");
+  const publicListRoute = noteRoutes.find((route) => route.path === "/");
+  assert.ok(uploadPresignRoute.stack.some((layer) => layer.handle === notesUploadLimiter));
+  assert.ok(publicListRoute.stack.some((layer) => layer.handle === notesSearchLimiter));
+  assert.ok(publicListRoute.stack.some((layer) => layer.handle === publicNotesListLimiter));
 });
 
 test("logout clears the authentication cookie without returning it", () => {

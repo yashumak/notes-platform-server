@@ -20,10 +20,10 @@ a photo updates that user's object.
 
 ## Local setup
 
-Install dependencies and copy `.env.example` to `.env`. Set the MongoDB and JWT
-values. Set `AWS_REGION` and `AWS_S3_BUCKET`; for local development, provide an
-IAM user key pair in the backend `.env`. Never put AWS variables in the
-frontend environment or commit real credentials.
+Install dependencies with Node.js 20 or newer and copy `.env.example` to
+`.env`. Set the MongoDB and JWT values. Set `AWS_REGION` and `AWS_S3_BUCKET`;
+for local development, provide an IAM user key pair in the backend `.env`.
+Never put AWS variables in the frontend environment or commit real credentials.
 
 The AWS SDK uses its default credential provider chain. On AWS, prefer an
 instance/task role and omit `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
@@ -40,6 +40,7 @@ following values:
 | Variable | Required | Description |
 |---|---|---|
 | `PORT` | No | HTTP port; defaults to `5000` |
+| `NODE_ENV` | No | Set to `production` on deployed backend instances |
 | `MONGO_URI` | Yes | MongoDB connection string |
 | `JWT_SECRET` | Yes | Private signing secret of at least 32 bytes |
 | `FRONTEND_URL` | Yes | Exact frontend origin for API CORS |
@@ -48,6 +49,9 @@ following values:
 | `AWS_ACCESS_KEY_ID` | No | Local IAM user key; omit when using an IAM role |
 | `AWS_SECRET_ACCESS_KEY` | No | Local IAM secret; omit when using an IAM role |
 | `MAX_NOTE_FILE_SIZE_BYTES` | No | Maximum note upload size in bytes |
+| `REDIS_URL` | Production | Private Redis/ElastiCache URL for shared rate-limit state |
+| `TRUST_PROXY_HOPS` | No | Exact trusted proxy hop count; defaults to `1` for one AWS load balancer |
+| `RATE_LIMIT_*` | No | Per-policy window and request limits; see `.env.example` |
 
 ## S3 setup
 
@@ -150,6 +154,43 @@ plain text, CSV, Markdown, JSON, XML, JPEG, PNG, GIF, and WebP. File extension
 and declared MIME type must match, and the backend checks the object's content
 signature after upload. The frontend displays byte progress and does not send
 the file body through the application server.
+
+## API rate limits
+
+Rate limits are centralized in `middlewares/rateLimiters.js`. Initial defaults
+are 100 general API requests per IP per minute; 5 login requests per IP per
+minute; 5 failed login attempts per normalized account per 15 minutes; 5
+signups per IP per minute; 3 password changes per IP per 15 minutes; 10 upload
+URL requests per IP per 10 minutes; 30 filtered/search notes requests per IP
+per minute; and 60 unfiltered public notes-list requests per IP per minute.
+Each window and limit is independently configurable with the `RATE_LIMIT_*`
+variables in `.env.example`. The specific endpoint policy replaces the general
+limiter for that request, rather than stacking duplicate counters.
+
+Login account identifiers are normalized and HMACed with `JWT_SECRET` before
+being used as store keys, so raw email addresses are not written to Redis.
+Successful logins do not count toward the failed-attempt limit. Rate-limit
+responses use HTTP 429, the `Retry-After` header, standard `RateLimit` headers,
+and a JSON message with `retryAfterSeconds`. Logs record only the limiter name,
+never client IPs, account identifiers, passwords, or tokens.
+
+For production, provision private Redis (for example, AWS ElastiCache) and set
+`REDIS_URL` in the backend secret configuration. Production startup fails if
+Redis is not configured, and requests fail closed if the shared store becomes
+unavailable; this prevents each replica from silently enforcing an independent
+in-memory limit. Restrict Redis network access to the backend security group and
+use TLS/authentication where supported. In development, omitting `REDIS_URL`
+uses the process-local memory store.
+
+`TRUST_PROXY_HOPS` controls Express's proxy trust setting used to derive client
+IP addresses. Set it to the exact number of trusted proxies in front of the
+backend (usually `1` for an application reachable only through one AWS ALB).
+Do not expose the backend directly to untrusted clients when trusting a proxy,
+and do not increase the hop count without matching it to the deployment path.
+There are currently no password-recovery or OTP verification API routes; the
+central configuration includes their requested 3-per-15-minute and
+5-per-10-minute policies for use when those routes are introduced. The existing
+authenticated password-change endpoint is limited to 3 requests per 15 minutes.
 
 ## Deployment
 

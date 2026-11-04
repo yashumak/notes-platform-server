@@ -1,6 +1,5 @@
 import express from "express";
 import multer from "multer";
-import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import {
   getProfilePhoto,
@@ -13,24 +12,15 @@ import {
   changePassword,
 } from "../controllers/auth.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
+import {
+  loginAccountLimiter,
+  loginIpLimiter,
+  passwordChangeLimiter,
+  signupLimiter,
+} from "../middlewares/rateLimiters.js";
 import { decryptAuthPayload, getAuthPayloadPublicKey } from "../utils/authPayloadEncryption.js";
 
 const router = express.Router();
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 10,
-  skipSuccessfulRequests: true,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many failed login attempts. Please try again in 15 minutes." },
-});
-const passwordChangeLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many password change attempts. Please try again later." },
-});
 const allowedPhotoTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 const profilePhotoUpload = multer({
   storage: multer.memoryStorage(),
@@ -105,8 +95,16 @@ router.get("/encryption-key", (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({ publicKey: getAuthPayloadPublicKey() });
 });
-router.post("/register", decryptAuthPayload, registerValidation, handleValidationErrors, registerUser);
-router.post("/login", loginLimiter, decryptAuthPayload, loginValidation, handleValidationErrors, loginUser);
+router.post("/register", signupLimiter, decryptAuthPayload, registerValidation, handleValidationErrors, registerUser);
+router.post(
+  "/login",
+  loginIpLimiter,
+  decryptAuthPayload,
+  loginValidation,
+  handleValidationErrors,
+  loginAccountLimiter,
+  loginUser
+);
 router.post("/logout", logoutUser);
 router.get("/verify", protect, verifyUser);
 router.get("/profile/photo", protect, getProfilePhoto);
