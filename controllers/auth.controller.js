@@ -30,9 +30,8 @@ const getProfilePhotosBucket = () =>
   });
 
 const getProfilePhotoUrl = (user) => {
-  const version = user.profilePhotoS3Key || user.profilePhotoFileId;
-  return version
-    ? `/api/auth/profile/photo?v=${encodeURIComponent(version)}`
+  return user.profilePhotoS3Key || user.profilePhotoFileId
+    ? "/api/auth/profile/photo"
     : null;
 };
 
@@ -190,46 +189,50 @@ export const logoutUser = (req, res) => {
   res.json({ message: "Logged out successfully" });
 };
 
-// Verify the session and return the minimal user details needed by the UI.
+// Verify the session without returning account profile data.
 export const verifyUser = async (req, res) => {
   const expiresAt = Math.min(
     req.user.exp,
     req.user.iat + AUTH_SESSION_SECONDS
   ) * 1000;
-  const user = await User.findById(req.user.id).select(
-    "name user_id email university course year profilePhotoS3Key profilePhotoFileId profilePhotoContentType"
-  );
+  const user = await User.findById(req.user.id).select("_id");
 
   if (!user) {
     return res.status(401).json({ isAuthenticated: false, message: "Not authenticated" });
   }
 
-  const userId = await ensureUserId(user);
-
-  if (
-    user.profilePhotoFileId ||
-    user.profilePhotoS3Key?.startsWith(LEGACY_PROFILE_PHOTO_PREFIX)
-  ) {
-    try {
-      await migrateLegacyProfilePhoto(user);
-    } catch {
-      logError("profile_photo.migration_failed");
-    }
-  }
-
-  res.json({
+  res.setHeader("Cache-Control", "no-store");
+  return res.json({
     isAuthenticated: true,
     expiresAt,
-    user: {
-      id: userId,
-      name: user.name,
-      email: user.email,
-      university: user.university,
-      course: user.course,
-      year: user.year,
-      profilePhotoUrl: getProfilePhotoUrl(user),
-    },
   });
+};
+
+export const getProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select(
+      "name user_id email university course year profilePhotoS3Key profilePhotoFileId"
+    );
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const userId = await ensureUserId(user);
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({
+      success: true,
+      user: {
+        id: userId,
+        name: user.name,
+        email: user.email,
+        university: user.university,
+        course: user.course,
+        year: user.year,
+        profilePhotoUrl: getProfilePhotoUrl(user),
+      },
+    });
+  } catch {
+    logError("profile.load_failed");
+    return res.status(500).json({ message: "Could not load your profile" });
+  }
 };
 
 export const getProfilePhoto = async (req, res) => {

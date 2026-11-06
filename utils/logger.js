@@ -1,5 +1,11 @@
-const writeLog = (level, event) => {
-  const output = JSON.stringify({ level, event });
+import { maskSensitiveData } from "./dataMasking.js";
+
+const writeLog = (level, event, context) => {
+  const output = JSON.stringify({
+    level,
+    event: maskSensitiveData(event),
+    ...(context === undefined ? {} : { context: maskSensitiveData(context) }),
+  });
   if (level === "error") {
     console.error(output);
   } else {
@@ -7,5 +13,5 @@ const writeLog = (level, event) => {
   }
 };
 
-export const logInfo = (event) => writeLog("info", event);
-export const logError = (event) => writeLog("error", event);
+export const logInfo = (event, context) => writeLog("info", event, context);
+export const logError = (event, context) => writeLog("error", event, context);

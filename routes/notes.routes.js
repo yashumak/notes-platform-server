@@ -16,12 +16,17 @@ import {
 } from "../middlewares/rateLimiters.js";
 
 const router = express.Router();
-router.post("/upload/presign", protect, notesUploadLimiter, createNoteUploadUrl);
-router.post("/upload/complete", protect, completeNoteUpload);
+const noStore = (_req, res, next) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  next();
+};
+
+router.post("/upload/presign", noStore, protect, notesUploadLimiter, createNoteUploadUrl);
+router.post("/upload/complete", noStore, protect, completeNoteUpload);
 router.post("/upload", protect, notesUploadLimiter, (_req, res) =>
   res.status(410).json({ message: "Use the presigned upload endpoints for note files" })
 );
-router.get("/mine", protect, listMyNotes);
+router.get("/mine", noStore, protect, listMyNotes);
 router.delete("/:id", protect, deleteMyNote);
 router.get("/stats", getNoteStats);
 router.get("/", notesSearchLimiter, publicNotesListLimiter, listNotes);

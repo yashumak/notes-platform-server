@@ -33,6 +33,7 @@ import { protect } from "../middlewares/authMiddleware.js";
 import { hasValidFileSignature, validateFileMetadata } from "../utils/fileValidation.js";
 import {
   changePassword,
+  getProfile,
   getProfilePhoto,
   loginUser,
   logoutUser,
@@ -43,6 +44,7 @@ import {
 } from "../controllers/auth.controller.js";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
+import connectDB from "../config/db.js";
 import { ensureUserId, generateUserId } from "../utils/userId.js";
 import {
   hasNoteSearchCriteria,
@@ -60,6 +62,7 @@ import {
 } from "../middlewares/rateLimiters.js";
 import { decryptAuthPayload, getAuthPayloadPublicKey } from "../utils/authPayloadEncryption.js";
 import { s3Storage, UPLOAD_URL_TTL_SECONDS } from "../services/s3Storage.js";
+import { requireHttps } from "../middlewares/requireHttps.js";
 
 const encryptAuthPayloadForTest = (payload) => {
   const aesKey = randomBytes(32);
@@ -139,6 +142,105 @@ test("invalid encrypted auth requests are rejected without exposing details", ()
 
   assert.equal(responseStatus, 400);
   assert.deepEqual(responseBody, { message: "Encrypted request payload is invalid" });
+});
+
+test("tampered encrypted authentication payloads are rejected", () => {
+  const encryptedPayload = encryptAuthPayloadForTest({
+    email: "private@example.test",
+    password: "safe-test-password",
+  });
+  const encryptedData = Buffer.from(encryptedPayload.encryptedData, "base64");
+  encryptedData[0] ^= 0xff;
+  encryptedPayload.encryptedData = encryptedData.toString("base64");
+  let responseStatus;
+  let responseBody;
+
+  decryptAuthPayload(
+    { body: encryptedPayload },
+    {
+      status(status) { responseStatus = status; return this; },
+      json(body) { responseBody = body; return this; },
+    },
+    () => assert.fail("tampered encrypted payload must not be accepted")
+  );
+
+  assert.equal(responseStatus, 400);
+  assert.deepEqual(responseBody, { message: "Encrypted request payload is invalid" });
+});
+
+test("the auth encryption-key API exposes only the protocol-required public key", async () => {
+  const app = express();
+  app.use("/api/auth", authRoutes);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/auth/encryption-key`);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.publicKey, getAuthPayloadPublicKey());
+    assert.equal(Object.keys(body).length, 1);
+    assert.equal(body.publicKey.includes("PRIVATE KEY"), false);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("production APIs reject insecure HTTP and accept trusted HTTPS forwarding", async () => {
+  const app = express();
+  app.set("trust proxy", 1);
+  app.use(requireHttps);
+  app.get("/health", (_req, res) => res.json({ success: true }));
+  const server = app.listen(0, "127.0.0.1");
+  const originalEnvironment = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+
+  try {
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const insecureResponse = await fetch(`http://127.0.0.1:${address.port}/health`);
+    assert.equal(insecureResponse.status, 426);
+    assert.deepEqual(await insecureResponse.json(), { message: "HTTPS is required" });
+
+    const secureResponse = await fetch(`http://127.0.0.1:${address.port}/health`, {
+      headers: { "x-forwarded-proto": "https" },
+    });
+    assert.equal(secureResponse.status, 200);
+    assert.deepEqual(await secureResponse.json(), { success: true });
+  } finally {
+    if (originalEnvironment === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalEnvironment;
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test("production MongoDB connections require TLS", async () => {
+  const originalConnect = mongoose.connect;
+  const originalEnvironment = process.env.NODE_ENV;
+  const originalMongoUri = process.env.MONGO_URI;
+  let connectionOptions;
+  process.env.NODE_ENV = "production";
+  process.env.MONGO_URI = "mongodb://database.example.test/noteshub";
+  mongoose.connect = async (_uri, options) => {
+    connectionOptions = options;
+  };
+
+  try {
+    await connectDB();
+    assert.equal(connectionOptions.tls, true);
+  } finally {
+    mongoose.connect = originalConnect;
+    if (originalEnvironment === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalEnvironment;
+    if (originalMongoUri === undefined) delete process.env.MONGO_URI;
+    else process.env.MONGO_URI = originalMongoUri;
+  }
 });
 
 test("encrypted auth requests reject additional plaintext fields", () => {
@@ -309,92 +411,100 @@ test("unauthenticated protected requests are rejected", () => {
   assert.deepEqual(responseBody, { message: "Unauthorized: No token provided" });
 });
 
-test("session verification returns the authenticated user ID for private cache isolation", async () => {
+test("session verification returns authentication state without profile or credential data", async () => {
   const originalFindById = User.findById;
-  const user = {
-    id: "private-user-id",
-    _id: "private-user-id",
-    user_id: "1234567890",
-    name: "Test User",
-    email: "test@example.com",
-    university: "Example University",
-    course: "Engineering",
-    year: "1st Year",
-    profilePhotoFileId: null,
-  };
+  const user = { _id: "private-user-id" };
   let responseBody;
+  const headers = {};
   User.findById = () => ({ select: async () => user });
 
   try {
     await verifyUser(
-      { user: { id: user.id, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 } },
-      { json: (body) => { responseBody = body; } }
+      { user: { id: user._id, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 } },
+      {
+        setHeader(name, value) { headers[name] = value; },
+        json(body) { responseBody = body; },
+      }
     );
   } finally {
     User.findById = originalFindById;
   }
 
-  assert.equal(responseBody.user.email, user.email);
-  assert.equal(responseBody.user.id, user.user_id);
+  assert.equal(responseBody.isAuthenticated, true);
+  assert.equal(typeof responseBody.expiresAt, "number");
+  assert.equal("user" in responseBody, false);
+  for (const field of ["email", "password", "accessToken", "refreshToken", "sessionId"]) {
+    assert.equal(field in responseBody, false);
+  }
+  assert.equal(headers["Cache-Control"], "no-store");
 });
 
-test("session verification migrates an existing GridFS profile photo to S3", async () => {
+test("session verification does not read or migrate profile photo data", async () => {
   const originalFindById = User.findById;
-  const originalGridFSBucket = Object.getOwnPropertyDescriptor(mongoose.mongo, "GridFSBucket");
-  const originals = {
-    putProfilePhoto: s3Storage.putProfilePhoto,
-    createProfilePhotoUrl: s3Storage.createProfilePhotoUrl,
-  };
-  const userId = new mongoose.Types.ObjectId();
-  const fileId = new mongoose.Types.ObjectId();
-  const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const userId = new mongoose.Types.ObjectId().toString();
+  const user = { _id: userId };
+  let responseBody;
+  User.findById = () => ({ select: async () => user });
+
+  try {
+    await verifyUser(
+      { user: { id: userId, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 } },
+      {
+        setHeader() {},
+        json(body) { responseBody = body; },
+      }
+    );
+  } finally {
+    User.findById = originalFindById;
+  }
+
+  assert.deepEqual(Object.keys(responseBody).sort(), ["expiresAt", "isAuthenticated"]);
+});
+
+test("authenticated profile response contains only the caller's profile DTO", async () => {
+  const originalFindById = User.findById;
   const user = {
-    _id: userId,
-    id: userId.toString(),
-    name: "Jane Doe",
     user_id: "9876543210",
+    name: "Jane Doe",
     email: "jane@example.test",
     university: "Example University",
     course: "Engineering",
     year: "2026",
-    profilePhotoFileId: fileId,
-    profilePhotoContentType: "image/png",
-    async save() {},
+    profilePhotoS3Key: "photos/private-s3-object-key",
+    password: "must-not-be-selected",
+    __v: 2,
   };
-  let uploadedPhoto;
   let responseBody;
-  class MockGridFSBucket {
-    openDownloadStream(id) {
-      assert.equal(id, fileId);
-      return Readable.from([image]);
-    }
-
-    async delete() {}
-  }
-  Object.defineProperty(mongoose.mongo, "GridFSBucket", {
-    configurable: true,
-    value: MockGridFSBucket,
-  });
+  const headers = {};
   User.findById = () => ({ select: async () => user });
-  s3Storage.putProfilePhoto = async (photo) => { uploadedPhoto = photo; };
-  s3Storage.createProfilePhotoUrl = async () => "https://s3.example.test/photo";
 
   try {
-    await verifyUser(
-      { user: { id: user.id, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 } },
-      { json: (body) => { responseBody = body; } }
+    await getProfile(
+      { user: { id: "private-mongo-id" } },
+      {
+        setHeader(name, value) { headers[name] = value; },
+        json(body) { responseBody = body; },
+      }
     );
   } finally {
-    Object.defineProperty(mongoose.mongo, "GridFSBucket", originalGridFSBucket);
     User.findById = originalFindById;
-    s3Storage.putProfilePhoto = originals.putProfilePhoto;
-    s3Storage.createProfilePhotoUrl = originals.createProfilePhotoUrl;
   }
 
-  assert.equal(uploadedPhoto.key, "photos/jane-doe-9876543210");
-  assert.equal(user.profilePhotoFileId, undefined);
-  assert.equal(user.profilePhotoS3Key, uploadedPhoto.key);
-  assert.equal(responseBody.user.profilePhotoUrl, `/api/auth/profile/photo?v=${encodeURIComponent(uploadedPhoto.key)}`);
+  assert.deepEqual(responseBody, {
+    success: true,
+    user: {
+      id: "9876543210",
+      name: "Jane Doe",
+      email: "jane@example.test",
+      university: "Example University",
+      course: "Engineering",
+      year: "2026",
+      profilePhotoUrl: "/api/auth/profile/photo",
+    },
+  });
+  assert.equal(JSON.stringify(responseBody).includes("private-s3-object-key"), false);
+  assert.equal(JSON.stringify(responseBody).includes("must-not-be-selected"), false);
+  assert.equal(headers["Cache-Control"], "no-store");
 });
 
 test("upload validation checks file contents against the declared type", () => {
@@ -776,6 +886,7 @@ test("note upload URLs validate metadata and bind the upload to the authenticate
           },
         },
         {
+          setHeader() {},
           status(status) {
             responseStatus = status;
             return this;
@@ -1035,6 +1146,7 @@ test("user note index reads only that account's indexed note records", async () 
 test("dashboard note listing uses the account index instead of scanning all notes", async () => {
   const originalFindById = User.findById;
   const originalFind = Note.find;
+  const originalCountDocuments = Note.countDocuments;
   const originalListUserRecords = s3Storage.listNoteRecordsForUser;
   const originalListAllRecords = s3Storage.listNoteRecords;
   const ownerId = new mongoose.Types.ObjectId().toString();
@@ -1047,8 +1159,10 @@ test("dashboard note listing uses the account index instead of scanning all note
   User.findById = () => ({ select: async () => ({ notesIndexInitialized: true }) });
   Note.find = () => ({
     sort() { return this; },
+    limit() { return this; },
     select: async () => [],
   });
+  Note.countDocuments = async () => 0;
   s3Storage.listNoteRecordsForUser = async ({ uploadedBy }) => {
     listedOwner = uploadedBy;
     return records;
@@ -1058,23 +1172,31 @@ test("dashboard note listing uses the account index instead of scanning all note
   try {
     await listMyNotes(
       { user: { id: ownerId } },
-      { json(body) { responseBody = body; return this; } }
+      {
+        setHeader() {},
+        json(body) { responseBody = body; return this; },
+      }
     );
   } finally {
     User.findById = originalFindById;
     Note.find = originalFind;
+    Note.countDocuments = originalCountDocuments;
     s3Storage.listNoteRecordsForUser = originalListUserRecords;
     s3Storage.listNoteRecords = originalListAllRecords;
   }
 
   assert.equal(listedOwner, ownerId);
   assert.deepEqual(responseBody.notes.map(({ title }) => title), ["First", "Second"]);
+  assert.deepEqual(responseBody.pagination, { page: 1, limit: 30, total: 2, totalPages: 1 });
+  assert.equal("uploadedBy" in responseBody.notes[0], false);
+  assert.equal("s3Key" in responseBody.notes[0], false);
 });
 
 test("dashboard note listing caches a user's legacy S3 records once", async () => {
   const originalFindById = User.findById;
   const originalUpdateOne = User.updateOne;
   const originalFind = Note.find;
+  const originalCountDocuments = Note.countDocuments;
   const originalListRecords = s3Storage.listNoteRecords;
   const originalPutUserIndex = s3Storage.putUserNoteIndex;
   const ownerId = new mongoose.Types.ObjectId().toString();
@@ -1089,20 +1211,26 @@ test("dashboard note listing caches a user's legacy S3 records once", async () =
   };
   Note.find = () => ({
     sort() { return this; },
+    limit() { return this; },
     select: async () => [],
   });
+  Note.countDocuments = async () => 0;
   s3Storage.listNoteRecords = async () => [userNote, foreignNote];
   s3Storage.putUserNoteIndex = async (note) => indexedNotes.push(note);
 
   try {
     await listMyNotes(
       { user: { id: ownerId } },
-      { json(body) { responseBody = body; return this; } }
+      {
+        setHeader() {},
+        json(body) { responseBody = body; return this; },
+      }
     );
   } finally {
     User.findById = originalFindById;
     User.updateOne = originalUpdateOne;
     Note.find = originalFind;
+    Note.countDocuments = originalCountDocuments;
     s3Storage.listNoteRecords = originalListRecords;
     s3Storage.putUserNoteIndex = originalPutUserIndex;
   }
@@ -1113,6 +1241,7 @@ test("dashboard note listing caches a user's legacy S3 records once", async () =
     update: { $set: { notesIndexInitialized: true } },
   });
   assert.deepEqual(responseBody.notes.map(({ title }) => title), ["Legacy upload"]);
+  assert.equal(responseBody.pagination.total, 1);
 });
 
 test("note records list from current and legacy metadata prefixes", async () => {
@@ -1955,7 +2084,7 @@ test("profile photo uploads store the image in S3 and keep the object key on the
   assert.equal(user.profilePhotoS3Key, uploadedPhoto.key);
   assert.equal(user.profilePhotoContentType, "image/png");
   assert.equal(user.profilePhotoFileId, undefined);
-  assert.equal(responseBody.profilePhotoUrl, `/api/auth/profile/photo?v=${encodeURIComponent(uploadedPhoto.key)}`);
+  assert.equal(responseBody.profilePhotoUrl, "/api/auth/profile/photo");
 });
 
 test("legacy GridFS profile photos migrate to S3 when requested", async () => {

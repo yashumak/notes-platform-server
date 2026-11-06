@@ -43,6 +43,7 @@ following values:
 | `NODE_ENV` | No | Set to `production` on deployed backend instances |
 | `MONGO_URI` | Yes | MongoDB connection string |
 | `JWT_SECRET` | Yes | Private signing secret of at least 32 bytes |
+| `AUTH_ENCRYPTION_PRIVATE_KEY` | Production | RSA private key (PEM) used only by the backend to decrypt login and registration fields |
 | `FRONTEND_URL` | Yes | Exact frontend origin for API CORS |
 | `AWS_REGION` | No | S3 region; defaults to `ap-south-1` |
 | `AWS_S3_BUCKET` | Yes | Private bucket used for note and profile-photo objects |
@@ -148,6 +149,15 @@ using two-minute presigned URLs; the bucket remains private.
 - `DELETE /api/notes/:id` — authenticated; owner-only. S3 note records are
   marked as deleting before object removal so failed deletes can be retried.
 - `GET /api/notes/stats` — public note statistics.
+- `GET /api/auth/verify` — authenticated session status and expiry only.
+- `GET /api/auth/profile` — authenticated profile DTO for the current account.
+- `GET /api/auth/encryption-key` — public RSA key required by the login and
+  registration encryption protocol; the corresponding private key is backend-only.
+
+Authenticated API responses are sent with `Cache-Control: private, no-store`.
+`GET /api/notes` accepts `page` and `limit` (maximum 30) and returns paginated,
+allowlisted note metadata. `GET /api/notes/mine` is owner-scoped and returns at
+most 30 notes per page; private file access is checked again on every download.
 
 Supported file formats include PDF, legacy and Open XML Word/PowerPoint/Excel,
 plain text, CSV, Markdown, JSON, XML, JPEG, PNG, GIF, and WebP. File extension
@@ -196,6 +206,21 @@ IP addresses. Set it to the exact number of trusted proxies in front of the
 backend (usually `1` for an application reachable only through one AWS ALB).
 Do not expose the backend directly to untrusted clients when trusting a proxy,
 and do not increase the hop count without matching it to the deployment path.
+In production the API rejects requests that do not arrive over HTTPS (directly
+or through the configured trusted TLS-terminating proxy). Configure TLS at the
+public load balancer/hosting edge and set the trusted proxy hop count accurately.
+Production MongoDB connections also require TLS with certificate verification.
+Production startup requires `AUTH_ENCRYPTION_PRIVATE_KEY`; store the PEM value
+in the backend host's secret manager and use the same key across backend
+replicas. Its matching public key is intentionally exposed for the existing
+RSA-OAEP/AES-256-GCM authentication-payload protocol. Application-level
+encryption is not applied to ordinary profile or note metadata; use MongoDB
+deployment encryption-at-rest and encrypted backups for those stores. S3
+uploads require SSE-S3 (`AES256`), and the bucket must remain private.
+
+The application does not implement a versioned encryption-key ring or
+zero-downtime private-key rotation. Coordinate key replacement across all
+backend replicas, and verify login/registration clients during rotation.
 There are currently no password-recovery or OTP verification API routes; the
 central configuration includes their requested 3-per-15-minute and
 5-per-10-minute policies for use when those routes are introduced. The existing
@@ -221,3 +246,19 @@ Existing GridFS records and objects are retained and continue to use the
 legacy GridFS download path. New uploads use S3. Plan any migration separately;
 do not remove GridFS collections until all existing references have been
 verified and migrated.
+
+## API logging and data masking
+
+Requests under `/api` pass through `middlewares/apiRequestLogger.js`. Logs
+include the HTTP method, route template, status, duration, sanitized query and
+body data, and sanitized JSON responses. Raw URLs, request headers, cookies,
+redirect locations, and uploaded file contents are not logged. Uploads are
+represented by a file count only.
+
+`utils/dataMasking.js` masks passwords, tokens, credentials, and authorization
+values; partially masks email addresses and names; and redacts private profile
+fields, note text and metadata, file details, S3 keys, and presigned URLs.
+Structured application logs use the same recursive masker. API request and
+response values are only copied and sanitized for logging; the original API
+payloads and responses are unchanged. Browser code does not log request,
+response, or authentication error objects.

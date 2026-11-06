@@ -10,6 +10,8 @@ import cors from "cors";
 import helmet from "helmet";
 import { logError, logInfo } from "./utils/logger.js";
 import { initializeAuthPayloadEncryption } from "./utils/authPayloadEncryption.js";
+import { apiRequestLogger } from "./middlewares/apiRequestLogger.js";
+import { requireHttps } from "./middlewares/requireHttps.js";
 import {
   generalApiLimiter,
   initializeRateLimitStore,
@@ -32,6 +34,8 @@ if (!Number.isSafeInteger(trustedProxyHops) || trustedProxyHops < 0) {
   process.exit(1);
 }
 app.set("trust proxy", trustedProxyHops);
+
+app.use(requireHttps);
 
 if (!process.env.JWT_SECRET || Buffer.byteLength(process.env.JWT_SECRET) < 32) {
   logError("startup.jwt_secret_missing_or_weak");
@@ -57,6 +61,7 @@ app.use(
 );
 
 app.use(helmet());
+app.use("/api", apiRequestLogger);
 app.use("/api", generalApiLimiter);
 app.use(express.json());
 app.use(cookieParser());
@@ -77,25 +82,44 @@ app.use((err, _req, res, _next) => {
       message: "Rate limiting is temporarily unavailable. Please try again later.",
     });
   }
-  const status = err.code === "LIMIT_FILE_SIZE" ? 413 : 500;
+  const isBodyParserError = [
+    "entity.parse.failed",
+    "entity.too.large",
+    "encoding.unsupported",
+    "charset.unsupported",
+  ].includes(err.type);
+  const parserStatus = isBodyParserError && [400, 413, 415].includes(err.status)
+    ? err.status
+    : undefined;
+  const status = err.code === "LIMIT_FILE_SIZE" || parserStatus === 413 ? 413 : 500;
   const isUploadInputError =
     err.code === "LIMIT_FILE_SIZE" ||
     err.code === "LIMIT_FIELD_VALUE" ||
     err.message === "Unsupported file type";
-  const responseStatus = isUploadInputError ? (status === 413 ? 413 : 400) : status;
+  const responseStatus = isUploadInputError
+    ? (status === 413 ? 413 : 400)
+    : parserStatus || status;
   logError(
     responseStatus === 413
       ? "request.upload_too_large"
-      : responseStatus === 400
+      : isUploadInputError
         ? "request.upload_rejected"
-        : "request.failed"
+        : responseStatus === 400
+          ? "request.invalid_body"
+          : responseStatus === 415
+            ? "request.unsupported_content_type"
+            : "request.failed"
   );
   res.status(responseStatus).json({
     message: responseStatus === 413
       ? "Uploaded file or request exceeds the allowed size"
       : responseStatus === 400
-        ? "Upload request was rejected"
-        : "Request failed",
+        ? isUploadInputError
+          ? "Upload request was rejected"
+          : "Request body is invalid"
+        : responseStatus === 415
+          ? "Unsupported request content type"
+          : "Request failed",
   });
 });
 

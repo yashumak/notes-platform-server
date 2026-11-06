@@ -205,6 +205,7 @@ export const createNoteUploadUrl = async (req, res) => {
       contentType: file.contentType,
       fileSize: file.fileSize,
     });
+    res.setHeader("Cache-Control", "no-store");
     return res.status(201).json({
       success: true,
       uploadUrl,
@@ -428,6 +429,12 @@ export const listNotes = async (req, res) => {
 
 export const listMyNotes = async (req, res) => {
   try {
+    const requestedPage = Number.parseInt(req.query?.page, 10);
+    const page = Number.isSafeInteger(requestedPage) && requestedPage > 0
+      ? Math.min(requestedPage, 10_000)
+      : 1;
+    const limit = 30;
+    const offset = (page - 1) * limit;
     const account = await User.findById(req.user.id).select("notesIndexInitialized");
     if (!account) return res.status(404).json({ message: "User not found" });
 
@@ -446,9 +453,14 @@ export const listMyNotes = async (req, res) => {
       );
     }
 
-    const legacyNotes = await Note.find({ uploadedBy: req.user.id })
+    const legacyQuery = { uploadedBy: req.user.id, uploadStatus: { $ne: "deleting" } };
+    const [legacyNotes, legacyTotal] = await Promise.all([
+      Note.find(legacyQuery)
       .sort({ createdAt: -1 })
-      .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt");
+      .limit(offset + limit)
+      .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
+      Note.countDocuments(legacyQuery),
+    ]);
     const notes = [
       ...s3Notes.filter(
         (note) =>
@@ -457,10 +469,18 @@ export const listMyNotes = async (req, res) => {
       ),
       ...legacyNotes,
     ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const total = s3Notes.filter((note) => note.uploadStatus !== "deleting").length + legacyTotal;
 
+    res.setHeader("Cache-Control", "private, no-store");
     res.json({
       success: true,
-      notes: notes.map((note) => serializeNote(note)),
+      notes: notes.slice(offset, offset + limit).map((note) => serializeNote(note)),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
     });
   } catch (error) {
     logNotesOperationFailure("notes.user_list_failed", error);

@@ -3,7 +3,9 @@ import { logError, logInfo } from "../utils/logger.js";
 
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {});
+    await mongoose.connect(process.env.MONGO_URI, {
+      ...(process.env.NODE_ENV === "production" ? { tls: true } : {}),
+    });
 
     logInfo("database.connected");
   } catch (error) {

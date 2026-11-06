@@ -6,6 +6,7 @@ import {
   registerUser,
   loginUser,
   logoutUser,
+  getProfile,
   verifyUser,
   updateProfile,
   updateProfilePhoto,
@@ -21,6 +22,10 @@ import {
 import { decryptAuthPayload, getAuthPayloadPublicKey } from "../utils/authPayloadEncryption.js";
 
 const router = express.Router();
+router.use((_req, res, next) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  next();
+});
 const allowedPhotoTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 const profilePhotoUpload = multer({
   storage: multer.memoryStorage(),
@@ -107,6 +112,7 @@ router.post(
 );
 router.post("/logout", logoutUser);
 router.get("/verify", protect, verifyUser);
+router.get("/profile", protect, getProfile);
 router.get("/profile/photo", protect, getProfilePhoto);
 router.put("/profile", protect, parseProfilePhoto, profileValidation, handleValidationErrors, updateProfile);
 router.put("/profile/photo", protect, parseProfilePhoto, updateProfilePhoto);
