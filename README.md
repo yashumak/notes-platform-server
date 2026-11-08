@@ -81,20 +81,6 @@ npm install
 
 Create a ".env" file in the project root.
 
-PORT=5000
-
-MONGODB_URI=your_mongodb_connection_string
-
-JWT_SECRET=your_jwt_secret
-
-S3_ENDPOINT=your_storage_endpoint
-S3_REGION=your_storage_region
-S3_ACCESS_KEY=your_access_key
-S3_SECRET_KEY=your_secret_key
-S3_BUCKET=your_bucket_name
-
-Replace the placeholder values with your actual credentials. Never upload ".env" to GitHub.
-
 4. Start the development server
 
 npm run dev
