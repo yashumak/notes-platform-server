@@ -34,38 +34,22 @@ CORS| Cross-origin resource sharing
 Express Rate Limit| API rate limiting
 Render| Backend deployment
 
-Project Structure
+## Project structure
 
-notes-platform-server/
-│
-├── config/
-│   └── db.js
-│
-├── controllers/
-│   ├── auth.controller.js
-│   └── notes.controller.js
-│
-├── middleware/
-│   ├── auth.middleware.js
-│   └── upload.middleware.js
-│
-├── models/
-│   ├── User.js
-│   └── Note.js
-│
-├── routes/
-│   ├── auth.routes.js
-│   └── notes.routes.js
-│
-├── utils/
-│
-├── index.js
-├── package.json
-├── package-lock.json
-└── .gitignore
-
-Note: The structure is illustrative. Update it if your actual repository uses different filenames or folders.
-
+```text
+backend/
+├── config/          # auth.js, db.js
+├── controllers/     # auth, and notes controllers
+├── middlewares/     # Authentication, validation, logging, and rate limits
+├── models/          # AdminAuditLog, Note, User, and UserActivity
+├── routes/          # auth, and notes API routes
+├── scripts/         # seed-admin.js
+├── services/        # S3 storage operations
+├── test/            # Automated tests
+├── utils/           # Shared authentication, logging, and validation helpers
+├── index.js         # Express application and server startup
+└── package.json     # Scripts and dependencies
+```
 Getting Started
 
 1. Clone the repository
