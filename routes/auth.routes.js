@@ -12,7 +12,7 @@ import {
   updateProfilePhoto,
   changePassword,
 } from "../controllers/auth.controller.js";
-import { protect } from "../middlewares/authMiddleware.js";
+import { optionalProtect, protect } from "../middlewares/authMiddleware.js";
 import {
   loginAccountLimiter,
   loginIpLimiter,
@@ -110,7 +110,7 @@ router.post(
   loginAccountLimiter,
   loginUser
 );
-router.post("/logout", logoutUser);
+router.post("/logout", optionalProtect, logoutUser);
 router.get("/verify", protect, verifyUser);
 router.get("/profile", protect, getProfile);
 router.get("/profile/photo", protect, getProfilePhoto);

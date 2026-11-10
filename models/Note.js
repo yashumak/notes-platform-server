@@ -31,6 +31,9 @@ const noteSchema = new mongoose.Schema(
 );
 
 noteSchema.index({ s3Key: 1 }, { unique: true, sparse: true });
+noteSchema.index({ createdAt: -1, uploadStatus: 1 });
+noteSchema.index({ visibility: 1, createdAt: -1, uploadStatus: 1 });
+noteSchema.index({ university: 1, course: 1, subject: 1 });
 
 const Note = mongoose.model("Note", noteSchema);
 export default Note;

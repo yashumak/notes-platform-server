@@ -11,6 +11,7 @@ import {
 import { s3Storage, UPLOAD_URL_TTL_SECONDS } from "../services/s3Storage.js";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
+import UserActivity from "../models/UserActivity.js";
 
 const getNoteFilesBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
@@ -25,6 +26,17 @@ const NOTE_RECORD_ID_PATTERN =
 
 const cleanText = (value, maxLength) =>
   typeof value === "string" ? value.trim().replace(/[\u0000-\u001f\u007f]/g, "").slice(0, maxLength) : "";
+
+const recordUserActivity = (userId, eventType, resourceId) => {
+  void UserActivity.create({
+    userId,
+    eventType,
+    success: true,
+    resourceId: resourceId ? String(resourceId).slice(0, 120) : undefined,
+  }).catch(() => {
+    logError("activity.record_failed");
+  });
+};
 
 const toS3PathSegment = (value, fallback, maxLength) => {
   const segment = String(value || "")
@@ -285,6 +297,7 @@ export const completeNoteUpload = async (req, res) => {
       createdAt: new Date().toISOString(),
     };
     await s3Storage.putNoteRecord(note);
+    recordUserActivity(req.user.id, "NOTE_UPLOAD", note._id);
     return res.status(201).json({
       success: true,
       message: "Note uploaded",
@@ -502,6 +515,7 @@ export const deleteMyNote = async (req, res) => {
       await s3Storage.putNoteRecord({ ...s3Note, uploadStatus: "deleting" });
       await s3Storage.deleteObject(s3Note.s3Key);
       await s3Storage.deleteNoteRecord(s3Note._id, { uploadedBy: s3Note.uploadedBy });
+      recordUserActivity(req.user.id, "NOTE_DELETE", s3Note._id);
       return res.json({ success: true, message: "Note deleted successfully" });
     }
 
@@ -534,6 +548,7 @@ export const deleteMyNote = async (req, res) => {
       await Note.deleteOne({ _id: req.params.id, uploadedBy: req.user.id });
     }
 
+    recordUserActivity(req.user.id, "NOTE_DELETE", req.params.id);
     return res.json({ success: true, message: "Note deleted successfully" });
   } catch {
     logError("notes.delete_failed");
@@ -557,6 +572,7 @@ export const downloadNoteFile = async (req, res) => {
         fileName: s3Note.fileName,
         contentType: s3Note.contentType,
       });
+      recordUserActivity(req.user?.id, "NOTE_DOWNLOAD", req.params.id);
       res.set("Cache-Control", "private, no-store");
       return res.redirect(302, downloadUrl);
     }
@@ -584,6 +600,7 @@ export const downloadNoteFile = async (req, res) => {
         fileName: note.fileName,
         contentType: note.contentType,
       });
+      recordUserActivity(req.user?.id, "NOTE_DOWNLOAD", req.params.id);
       res.set("Cache-Control", "private, no-store");
       return res.redirect(302, downloadUrl);
     }
@@ -603,6 +620,7 @@ export const downloadNoteFile = async (req, res) => {
         res.status(404).json({ message: "Note file not found" });
       }
     });
+    recordUserActivity(req.user?.id, "NOTE_DOWNLOAD", req.params.id);
     downloadStream.pipe(res);
   } catch {
     logError("notes.download_failed");

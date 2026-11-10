@@ -9,6 +9,7 @@
     "build": "node --check index.js",
     "dev": "nodemon index.js",
     "start": "node index.js",
+    "seed:admin": "node scripts/seed-admin.js",
     "test": "node --test test/*.test.js",
     "test:security": "node --test test/security.test.js"
   },

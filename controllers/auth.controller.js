@@ -7,10 +7,17 @@ import { logError } from "../utils/logger.js";
 import { hasValidFileSignature } from "../utils/fileValidation.js";
 import { ensureUserId, generateUserId } from "../utils/userId.js";
 import { s3Storage } from "../services/s3Storage.js";
+import UserActivity from "../models/UserActivity.js";
 
 const BCRYPT_ROUNDS = 12;
 const PROFILE_PHOTO_PREFIX = "photos/";
 const LEGACY_PROFILE_PHOTO_PREFIX = "profile-photo/";
+
+const recordActivity = async (userId, eventType, success) => {
+  void UserActivity.create({ userId, eventType, success }).catch(() => {
+    logError("activity.record_failed");
+  });
+};
 
 const toS3PathSegment = (value, fallback, maxLength) => {
   const segment = String(value || "")
@@ -102,7 +109,7 @@ const migrateLegacyProfilePhoto = async (user) => {
   return storeProfilePhoto(user, { buffer, mimetype: contentType });
 };
 
-const authCookieOptions = {
+export const authCookieOptions = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
   sameSite: "strict",
@@ -129,6 +136,7 @@ export const registerUser = async (req, res) => {
           university,
           course,
           year,
+          role: "USER",
           notesIndexInitialized: true,
         });
         break;
@@ -140,6 +148,7 @@ export const registerUser = async (req, res) => {
       }
     }
 
+    await recordActivity(user._id, "ACCOUNT_CREATED", true);
     const token = jwt.sign({ id: user._id, user_id: user.user_id }, process.env.JWT_SECRET, {
       expiresIn: AUTH_SESSION_SECONDS,
       algorithm: "HS256",
@@ -160,13 +169,22 @@ export const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email }).select("+password");
-    if (!user) return res.status(401).json({ message: "Invalid email or password" });
+    const user = await User.findOne({ email }).select("+password role accountStatus deletedAt");
+    if (!user) {
+      await recordActivity(undefined, "LOGIN", false);
+      return res.status(401).json({ message: "Invalid email or password" });
+    }
 
     const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(401).json({ message: "Invalid email or password" });
+    if (!match || user.deletedAt || (user.accountStatus && user.accountStatus !== "active")) {
+      await recordActivity(user._id, "LOGIN", false);
+      return res.status(401).json({ message: "Invalid email or password" });
+    }
 
     const userId = await ensureUserId(user);
+    user.lastLoginAt = new Date();
+    await user.save();
+    await recordActivity(user._id, "LOGIN", true);
     const token = jwt.sign({ id: user._id, user_id: userId }, process.env.JWT_SECRET, {
       expiresIn: AUTH_SESSION_SECONDS,
       algorithm: "HS256",
@@ -184,6 +202,7 @@ export const loginUser = async (req, res) => {
 
 // Logout
 export const logoutUser = (req, res) => {
+  if (req.user?.id) void recordActivity(req.user.id, "LOGOUT", true);
   res.clearCookie("token", authCookieOptions);
   res.clearCookie("token", { ...authCookieOptions, path: "/api/auth" });
   res.json({ message: "Logged out successfully" });
@@ -296,6 +315,7 @@ export const updateProfile = async (req, res) => {
     } else {
       await user.save();
     }
+    await recordActivity(user._id, "PROFILE_UPDATE", true);
 
     return res.json({
       success: true,
@@ -370,6 +390,7 @@ export const changePassword = async (req, res) => {
 
     user.password = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await user.save();
+    await recordActivity(user._id, "PASSWORD_CHANGE", true);
 
     res.clearCookie("token", authCookieOptions);
     return res.json({ message: "Password updated. Please log in again." });

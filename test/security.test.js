@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import bcrypt from "bcryptjs";
+import cookieParser from "cookie-parser";
 import express from "express";
 import { Readable } from "node:stream";
 import {
@@ -20,6 +21,7 @@ import {
 import test from "node:test";
 import authRoutes from "../routes/auth.routes.js";
 import notesRoutes from "../routes/notes.routes.js";
+import adminRoutes from "../routes/admin.routes.js";
 import {
   completeNoteUpload,
   createNoteUploadUrl,
@@ -411,6 +413,41 @@ test("unauthenticated protected requests are rejected", () => {
   assert.deepEqual(responseBody, { message: "Unauthorized: No token provided" });
 });
 
+test("protected sessions enforce current account status", async () => {
+  const originalJwtSecret = process.env.JWT_SECRET;
+  const originalFindById = User.findById;
+  process.env.JWT_SECRET = "test-jwt-secret-that-is-long-enough-for-tests";
+  const userId = new mongoose.Types.ObjectId().toString();
+  const token = jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: 3600 });
+
+  try {
+    for (const [user, expectedStatus] of [
+      [{ _id: userId, accountStatus: "suspended", deletedAt: null }, 403],
+      [{ _id: userId, accountStatus: "active", deletedAt: new Date() }, 401],
+    ]) {
+      User.findById = () => ({ select: async () => user });
+      let responseStatus;
+      const response = {
+        status(status) { responseStatus = status; return this; },
+        json() { return this; },
+      };
+      await protect({ cookies: { token } }, response, () => assert.fail("next should not run"));
+      assert.equal(responseStatus, expectedStatus);
+    }
+
+    User.findById = () => ({
+      select: async () => ({ _id: userId, accountStatus: "active", deletedAt: null }),
+    });
+    let nextCalled = false;
+    await protect({ cookies: { token } }, {}, () => { nextCalled = true; });
+    assert.equal(nextCalled, true);
+  } finally {
+    User.findById = originalFindById;
+    if (originalJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalJwtSecret;
+  }
+});
+
 test("session verification returns authentication state without profile or credential data", async () => {
   const originalFindById = User.findById;
   const user = { _id: "private-user-id" };
@@ -470,6 +507,7 @@ test("authenticated profile response contains only the caller's profile DTO", as
     university: "Example University",
     course: "Engineering",
     year: "2026",
+    role: "ADMIN",
     profilePhotoS3Key: "photos/private-s3-object-key",
     password: "must-not-be-selected",
     __v: 2,
@@ -2361,6 +2399,7 @@ test("registration stores a hash and only returns a generic success message", as
   assert.equal(createdUser.university, "Example University");
   assert.equal(createdUser.course, "Engineering");
   assert.equal(createdUser.year, "2026");
+  assert.equal(createdUser.role, "USER");
   assert.equal(createdUser.notesIndexInitialized, true);
   assert.equal(await bcrypt.compare(submittedPassword, createdUser.password), true);
   assert.notEqual(createdUser.password, submittedPassword);
@@ -2370,6 +2409,58 @@ test("registration stores a hash and only returns a generic success message", as
   assert.equal("password" in responseBody, false);
   assert.equal("token" in responseBody, false);
   assert.equal(JSON.stringify(responseBody).includes(submittedPassword), false);
+});
+
+test("admin APIs require an active ADMIN role from the database", async () => {
+  const originalFindById = User.findById;
+  const originalSecret = process.env.JWT_SECRET;
+  const jwtSecret = randomBytes(32).toString("hex");
+  const accountId = new mongoose.Types.ObjectId();
+  const app = express();
+  app.use(cookieParser());
+  app.use("/api/admin", adminRoutes);
+  const server = app.listen(0, "127.0.0.1");
+  process.env.JWT_SECRET = jwtSecret;
+
+  const tokenFor = (userId) => jwt.sign(
+    { id: accountId, user_id: userId },
+    jwtSecret,
+    { expiresIn: 3600, algorithm: "HS256" }
+  );
+  const request = async (token) => fetch(
+    `http://127.0.0.1:${server.address().port}/api/admin/auth/verify`,
+    token ? { headers: { cookie: `token=${token}` } } : undefined
+  );
+
+  try {
+    await new Promise((resolve) => server.once("listening", resolve));
+    const unauthenticated = await request();
+    assert.equal(unauthenticated.status, 401);
+
+    let account = { _id: accountId, role: "USER", accountStatus: "active", deletedAt: null };
+    User.findById = () => ({ select: async () => account });
+    const ordinaryUser = await request(tokenFor("1234567890"));
+    assert.equal(ordinaryUser.status, 403);
+
+    account = { ...account, role: "ADMIN", accountStatus: "suspended" };
+    const suspendedAdmin = await request(tokenFor("1234567890"));
+    assert.equal(suspendedAdmin.status, 403);
+
+    account = { ...account, accountStatus: "active" };
+    const activeAdmin = await request(tokenFor("1234567890"));
+    assert.equal(activeAdmin.status, 200);
+    const response = await activeAdmin.json();
+    assert.equal(response.isAuthenticated, true);
+    assert.equal(response.admin.role, "ADMIN");
+    assert.equal("token" in response, false);
+  } finally {
+    User.findById = originalFindById;
+    if (originalSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalSecret;
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 });
 
 test("login assigns and saves a user ID for an existing account", async () => {

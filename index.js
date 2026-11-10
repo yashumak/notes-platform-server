@@ -20,6 +20,7 @@ import {
 // Routes
 import authRoutes from "./routes/auth.routes.js";
 import notesRoutes from "./routes/notes.routes.js";
+import adminRoutes from "./routes/admin.routes.js";
 
 // DB
 import connectDB from "./config/db.js";
@@ -69,6 +70,7 @@ app.use(cookieParser());
 // ------------------ ROUTES ------------------
 app.use("/api/auth", authRoutes);
 app.use("/api/notes", notesRoutes);
+app.use("/api/admin", adminRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ message: "Not found" });
