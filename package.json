@@ -10,11 +10,17 @@
     "dev": "nodemon index.js",
     "start": "node index.js",
     "seed:admin": "node scripts/seed-admin.js",
+    "migrate:s3": "node scripts/migrate-to-s3.js",
+    "migrate:s3-metadata:dry": "node scripts/sync-s3-metadata.js --dry-run",
+    "migrate:s3-metadata:backup": "node scripts/sync-s3-metadata.js --backup",
+    "migrate:s3-metadata": "node scripts/sync-s3-metadata.js --apply",
+    "verify:s3-metadata": "node scripts/sync-s3-metadata.js --verify",
     "test": "node --test test/*.test.js",
     "test:security": "node --test test/security.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1159.0",
+    "@aws-sdk/lib-storage": "^3.1170.0",
     "@aws-sdk/s3-request-presigner": "^3.1159.0",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.3",

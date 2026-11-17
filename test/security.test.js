@@ -1062,17 +1062,38 @@ test("profile photos are stored in the photos S3 prefix with encryption", async 
   const originalSend = S3Client.prototype.send;
   const image = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   let uploadedCommand;
+  const commands = [];
   process.env.AWS_REGION = "ap-south-1";
   process.env.AWS_S3_BUCKET = "notes-test-bucket";
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
-  S3Client.prototype.send = async (command) => { uploadedCommand = command; };
+  S3Client.prototype.send = async (command) => {
+    commands.push(command);
+    if (command instanceof PutObjectCommand) uploadedCommand = command;
+    if (command instanceof HeadObjectCommand) {
+      return {
+        ETag: '"profile-etag"',
+        LastModified: new Date("2026-01-02T03:04:05.000Z"),
+        StorageClass: "STANDARD",
+        ContentLength: image.length,
+        Metadata: { source: "profile" },
+      };
+    }
+  };
 
   try {
-    await s3Storage.putProfilePhoto({
+    const metadata = await s3Storage.putProfilePhoto({
       key: "photos/jane-doe-1234567890",
       body: image,
       contentType: "image/png",
+    });
+    assert.deepEqual(metadata, {
+      bucket: "notes-test-bucket",
+      etag: '"profile-etag"',
+      lastModified: new Date("2026-01-02T03:04:05.000Z"),
+      storageClass: "STANDARD",
+      fileSize: image.length,
+      customMetadata: { source: "profile" },
     });
   } finally {
     S3Client.prototype.send = originalSend;
@@ -1089,9 +1110,10 @@ test("profile photos are stored in the photos S3 prefix with encryption", async 
   assert.equal(uploadedCommand.input.ContentType, "image/png");
   assert.equal(uploadedCommand.input.ServerSideEncryption, "AES256");
   assert.equal(uploadedCommand.input.CacheControl, "private, no-store");
+  assert.ok(commands[1] instanceof HeadObjectCommand);
 });
 
-test("new note records use the root metadata prefix", async () => {
+test("notes without a matching Mongo user retain the S3 metadata fallback", async () => {
   const savedEnvironment = {
     AWS_REGION: process.env.AWS_REGION,
     AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
@@ -1099,6 +1121,8 @@ test("new note records use the root metadata prefix", async () => {
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
   };
   const originalSend = S3Client.prototype.send;
+  const originalUserExists = User.exists;
+  const originalNoteExists = Note.exists;
   const uploadedCommands = [];
   const ownerId = new mongoose.Types.ObjectId().toString();
   const noteId = "7c78e950-3026-4fef-8290-0e4508aa2718";
@@ -1107,11 +1131,15 @@ test("new note records use the root metadata prefix", async () => {
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
   S3Client.prototype.send = async (command) => { uploadedCommands.push(command); };
+  User.exists = async () => null;
+  Note.exists = async () => false;
 
   try {
     await s3Storage.putNoteRecord({ _id: noteId, uploadedBy: ownerId });
   } finally {
     S3Client.prototype.send = originalSend;
+    User.exists = originalUserExists;
+    Note.exists = originalNoteExists;
     for (const [name, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -1121,11 +1149,65 @@ test("new note records use the root metadata prefix", async () => {
   assert.equal(uploadedCommands.length, 2);
   assert.ok(uploadedCommands.every((command) => command instanceof PutObjectCommand));
   assert.equal(uploadedCommands[0].input.Key, `metadata/${noteId}.json`);
-  assert.equal(
-    uploadedCommands[1].input.Key,
-    `metadata/users/${ownerId}/${noteId}.json`
-  );
+  assert.equal(uploadedCommands[1].input.Key, `metadata/users/${ownerId}/${noteId}.json`);
   assert.deepEqual(JSON.parse(uploadedCommands[1].input.Body.toString()), { _id: noteId });
+});
+
+test("note records use MongoDB when their owner can be resolved", async () => {
+  const savedEnvironment = {
+    AWS_REGION: process.env.AWS_REGION,
+    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+  const originals = {
+    send: S3Client.prototype.send,
+    userExists: User.exists,
+    findOne: Note.findOne,
+    findOneAndUpdate: Note.findOneAndUpdate,
+  };
+  const ownerId = new mongoose.Types.ObjectId();
+  const noteId = "7c78e950-3026-4fef-8290-0e4508aa2718";
+  const note = {
+    _id: noteId,
+    uploadedBy: ownerId.toString(),
+    s3Key: `notes/${ownerId}/upload.pdf`,
+    title: "Mongo note",
+    fileName: "upload.pdf",
+    contentType: "application/pdf",
+    fileSize: 9,
+    visibility: "private",
+    uploadStatus: "active",
+  };
+  let update;
+  process.env.AWS_REGION = "ap-south-1";
+  process.env.AWS_S3_BUCKET = "notes-test-bucket";
+  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
+  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  User.exists = async () => true;
+  Note.findOne = () => ({ lean: async () => null });
+  Note.findOneAndUpdate = (_query, updateDocument) => {
+    update = updateDocument;
+    return { lean: async () => ({ ...note, s3MetadataId: noteId }) };
+  };
+  S3Client.prototype.send = async () => assert.fail("Mapped note metadata must not be written to S3");
+
+  try {
+    const saved = await s3Storage.putNoteRecord(note);
+    assert.equal(saved._id, noteId);
+    assert.equal(update.$set.s3MetadataId, noteId);
+    assert.equal(update.$set.uploadedBy.toString(), ownerId.toString());
+    assert.equal(update.$set.s3ObjectMetadata.bucket, "notes-test-bucket");
+  } finally {
+    S3Client.prototype.send = originals.send;
+    User.exists = originals.userExists;
+    Note.findOne = originals.findOne;
+    Note.findOneAndUpdate = originals.findOneAndUpdate;
+    for (const [name, value] of Object.entries(savedEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
 
 test("user note index reads only that account's indexed note records", async () => {
@@ -1136,6 +1218,7 @@ test("user note index reads only that account's indexed note records", async () 
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
   };
   const originalSend = S3Client.prototype.send;
+  const originalFind = Note.find;
   const ownerId = new mongoose.Types.ObjectId().toString();
   const noteId = "7c78e950-3026-4fef-8290-0e4508aa2718";
   const listedPrefixes = [];
@@ -1144,6 +1227,10 @@ test("user note index reads only that account's indexed note records", async () 
   process.env.AWS_S3_BUCKET = "notes-test-bucket";
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  Note.find = () => ({
+    select() { return this; },
+    lean: async () => [],
+  });
   S3Client.prototype.send = async (command) => {
     if (command instanceof ListObjectsV2Command) {
       listedPrefixes.push(command.input.Prefix);
@@ -1171,6 +1258,7 @@ test("user note index reads only that account's indexed note records", async () 
     assert.equal(records[0].uploadedBy, ownerId);
   } finally {
     S3Client.prototype.send = originalSend;
+    Note.find = originalFind;
     for (const [name, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -1290,6 +1378,7 @@ test("note records list from current and legacy metadata prefixes", async () => 
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
   };
   const originalSend = S3Client.prototype.send;
+  const originalFind = Note.find;
   const currentId = "imported notes 2024";
   const legacyId = "4f4152a7-45bc-4c73-b2d0-468c8bc3c5a1";
   const listedPrefixes = [];
@@ -1298,6 +1387,10 @@ test("note records list from current and legacy metadata prefixes", async () => 
   process.env.AWS_S3_BUCKET = "notes-test-bucket";
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  Note.find = () => ({
+    select() { return this; },
+    lean: async () => [],
+  });
   S3Client.prototype.send = async (command) => {
     if (command instanceof ListObjectsV2Command) {
       listedPrefixes.push(command.input.Prefix);
@@ -1332,6 +1425,7 @@ test("note records list from current and legacy metadata prefixes", async () => 
     assert.deepEqual(records.map(({ title }) => title), ["Current", "Legacy"]);
   } finally {
     S3Client.prototype.send = originalSend;
+    Note.find = originalFind;
     for (const [name, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -1351,12 +1445,17 @@ test("S3 note page reads only the requested metadata records", async () => {
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
   };
   const originalSend = S3Client.prototype.send;
+  const originalFind = Note.find;
   const ids = Array.from({ length: 75 }, (_, index) => `paged-note-${index}`);
   const fetchedIds = [];
   process.env.AWS_REGION = "ap-south-1";
   process.env.AWS_S3_BUCKET = "notes-test-bucket";
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  Note.find = () => ({
+    select() { return this; },
+    lean: async () => [],
+  });
   S3Client.prototype.send = async (command) => {
     if (command instanceof ListObjectsV2Command) {
       return {
@@ -1389,6 +1488,7 @@ test("S3 note page reads only the requested metadata records", async () => {
     assert.equal(result.records[29]._id, "paged-note-15");
   } finally {
     S3Client.prototype.send = originalSend;
+    Note.find = originalFind;
     for (const [name, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -1404,6 +1504,7 @@ test("note records are fetched concurrently with a bounded number of S3 requests
     AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
   };
   const originalSend = S3Client.prototype.send;
+  const originalFind = Note.find;
   const ids = Array.from({ length: 30 }, (_, index) => `note-${index}`);
   let activeRequests = 0;
   let maxConcurrentRequests = 0;
@@ -1411,6 +1512,10 @@ test("note records are fetched concurrently with a bounded number of S3 requests
   process.env.AWS_S3_BUCKET = "notes-test-bucket";
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  Note.find = () => ({
+    select() { return this; },
+    lean: async () => [],
+  });
   S3Client.prototype.send = async (command) => {
     if (command instanceof ListObjectsV2Command) {
       return {
@@ -1440,6 +1545,7 @@ test("note records are fetched concurrently with a bounded number of S3 requests
     assert.ok(maxConcurrentRequests <= 25);
   } finally {
     S3Client.prototype.send = originalSend;
+    Note.find = originalFind;
     for (const [name, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -1478,13 +1584,19 @@ test("S3 upload verification checks size, MIME, encryption, and file signature",
   };
 
   try {
-    assert.equal(
+    assert.deepEqual(
       await s3Storage.verifyUploadedObject({
         key: "notes/test-user/document",
         contentType: "application/pdf",
         fileSize: 9,
       }),
-      true
+      {
+        bucket: "notes-test-bucket",
+        etag: undefined,
+        lastModified: undefined,
+        storageClass: "STANDARD",
+        customMetadata: {},
+      }
     );
     assert.equal(commands[1].input.Range, "bytes=0-8");
 
@@ -1631,7 +1743,7 @@ test("upload validation supports every file type when mobile MIME metadata is un
   );
 });
 
-test("upload completion stores private note metadata in S3 without creating a MongoDB note", async () => {
+test("upload completion stores private note metadata without using the legacy S3 index", async () => {
   const originalFindOne = Note.findOne;
   const originalCreate = Note.create;
   const originalVerify = s3Storage.verifyUploadedObject;
@@ -1648,7 +1760,10 @@ test("upload completion stores private note metadata in S3 without creating a Mo
   process.env.JWT_SECRET = "test-jwt-secret-that-is-long-enough-for-tests";
   Note.findOne = async () => null;
   s3Storage.getNoteRecord = async () => null;
-  s3Storage.verifyUploadedObject = async (object) => verified.push(object);
+  s3Storage.verifyUploadedObject = async (object) => {
+    verified.push(object);
+    return { bucket: "notes-test-bucket", etag: '"upload-etag"' };
+  };
   s3Storage.putNoteRecord = async (note) => {
     storedNote = note;
   };
@@ -1700,6 +1815,10 @@ test("upload completion stores private note metadata in S3 without creating a Mo
   assert.equal(storedNote.s3Key, key);
   assert.equal(storedNote.uploadedBy, ownerId);
   assert.equal(storedNote.visibility, "private");
+  assert.deepEqual(storedNote.s3ObjectMetadata, {
+    bucket: "notes-test-bucket",
+    etag: '"upload-etag"',
+  });
   assert.equal("s3Key" in responseBody.note, false);
 });
 
@@ -2090,6 +2209,11 @@ test("profile photo uploads store the image in S3 and keep the object key on the
   const userId = new mongoose.Types.ObjectId();
   let uploadedPhoto;
   let responseBody;
+  const photoMetadata = {
+    bucket: "notes-test-bucket",
+    etag: '"photo-etag"',
+    fileSize: 8,
+  };
   const user = {
     _id: userId,
     id: userId.toString(),
@@ -2098,7 +2222,10 @@ test("profile photo uploads store the image in S3 and keep the object key on the
     async save() {},
   };
   User.findById = async () => user;
-  s3Storage.putProfilePhoto = async (photo) => { uploadedPhoto = photo; };
+  s3Storage.putProfilePhoto = async (photo) => {
+    uploadedPhoto = photo;
+    return photoMetadata;
+  };
 
   try {
     await updateProfilePhoto(
@@ -2122,6 +2249,7 @@ test("profile photo uploads store the image in S3 and keep the object key on the
   assert.equal(user.profilePhotoS3Key, uploadedPhoto.key);
   assert.equal(user.profilePhotoContentType, "image/png");
   assert.equal(user.profilePhotoFileId, undefined);
+  assert.deepEqual(user.profilePhotoS3Metadata, photoMetadata);
   assert.equal(responseBody.profilePhotoUrl, "/api/auth/profile/photo");
 });
 

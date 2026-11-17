@@ -268,7 +268,7 @@ export const completeNoteUpload = async (req, res) => {
       return res.status(409).json({ message: "This upload has already been associated with a note" });
     }
 
-    await s3Storage.verifyUploadedObject({
+    const s3ObjectMetadata = await s3Storage.verifyUploadedObject({
       key: claims.key,
       contentType: claims.contentType,
       fileSize: claims.fileSize,
@@ -289,6 +289,7 @@ export const completeNoteUpload = async (req, res) => {
       fileName: sanitizeFileName(claims.fileName),
       s3Key: claims.key,
       storageProvider: "s3",
+      s3ObjectMetadata,
       contentType: claims.contentType,
       fileSize: claims.fileSize,
       uploadedBy: claims.sub,

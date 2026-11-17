@@ -49,15 +49,26 @@ const storeProfilePhoto = async (user, file) => {
   const oldS3Key = user.profilePhotoS3Key;
   const oldFileId = user.profilePhotoFileId;
 
-  await s3Storage.putProfilePhoto({
-    key,
-    body: file.buffer,
-    contentType: file.mimetype,
-  });
+  let photoMetadata;
+  try {
+    photoMetadata = await s3Storage.putProfilePhoto({
+      key,
+      body: file.buffer,
+      contentType: file.mimetype,
+    });
+  } catch (error) {
+    if (key !== oldS3Key) {
+      await s3Storage.deleteObject(key).catch(() => {
+        logError("profile_photo.incomplete_file_cleanup_failed");
+      });
+    }
+    throw error;
+  }
 
   user.profilePhotoS3Key = key;
   user.profilePhotoFileId = undefined;
   user.profilePhotoContentType = file.mimetype;
+  user.profilePhotoS3Metadata = photoMetadata;
   try {
     await user.save();
   } catch (error) {

@@ -126,6 +126,87 @@ server locally, use `npm start`.
 | `npm test` | Run the backend test suite |
 | `npm run test:security` | Run security-focused tests |
 | `npm run seed:admin` | Create or explicitly promote an administrator |
+| `npm run migrate:s3 -- [options]` | Review, back up, or manually migrate legacy GridFS files to S3 |
+| `npm run migrate:s3-metadata:dry` | Preview the S3 metadata synchronization |
+| `npm run migrate:s3-metadata:backup` | Back up MongoDB note and profile-photo metadata |
+| `npm run migrate:s3-metadata -- --backup-id <id>` | Apply the metadata synchronization |
+| `npm run verify:s3-metadata -- --backup-id <id>` | Verify the synchronized records |
+
+### Migrate legacy files to S3
+
+The backend already stores new note files and profile photos in the configured
+private S3 bucket. Legacy attachments are stored in the `noteFiles` and
+`profilePhotos` MongoDB GridFS buckets; MongoDB records are in the `notes` and
+`users` collections. The `uploads/notes` local-storage directory is currently
+empty, and the active `Note` schema has no local-path field. The migration
+script scans MongoDB references, both GridFS buckets, and the local `uploads/`
+directory. If local files or recognized legacy path fields are found, apply is
+blocked and they are reported rather than guessed at or silently skipped.
+
+Run these commands from the backend directory. The script defaults to a
+read-only dry run; it never runs during application startup:
+
+```powershell
+npm run migrate:s3 -- --dry-run
+npm run migrate:s3 -- --backup
+npm run migrate:s3 -- --apply --backup-id <backup-id-from-output>
+```
+
+Review the dry-run report and the backup output before applying. The backup is
+a new MongoDB collection named
+`noteshub_s3_migration_backup_<backup-id>` containing the original file
+references and storage-provider fields that may be changed. Do not use
+`--apply` without a completed backup ID. Re-running `--apply` with the same
+backup ID resumes safely: existing migrated objects are verified and skipped,
+and matching MongoDB records are updated without removing their original
+GridFS IDs or deleting GridFS data. S3 keys use the existing `notes/` and
+`photos/` prefixes and include each original filename. This migration creates
+no `metadata/` or `metradata/` objects; it leaves your existing metadata
+storage and MongoDB note metadata unchanged, updating only the file references.
+
+The migration uses `AWS_S3_BUCKET`, `AWS_REGION` (default
+`ap-south-1`), `MONGO_URI`, and the AWS SDK credential provider chain. Use an
+IAM role where available, or supply credentials through the normal AWS
+environment/credential provider mechanism; never add credentials to source
+control or logs. The migration identity needs read access to MongoDB, write
+access to the backup collection, `s3:GetObject` and `s3:PutObject` on the
+bucket's `notes/*` and `photos/*` keys, and permission to inspect object
+headers. Grant `s3:ListBucket` only for those key prefixes so the script can
+distinguish missing objects from denied reads. Objects are conditionally
+created, encrypted with SSE-S3, and checked for length, content type,
+encryption, and SHA-256 checksum before MongoDB pointers are changed. Failed
+uploads are retried; per-item logs and reports are written to
+`migration-reports/`. Missing GridFS sources and unresolved legacy paths are
+reported instead of silently skipped. The script does not delete MongoDB
+records, GridFS files, existing S3 objects, authentication data, or passwords.
+
+### Synchronize S3 object metadata into MongoDB
+
+The metadata-only sync uses the existing `notes` and `users` collections. It
+does not download file bodies, upload or delete S3 objects, or create a
+`metadata` collection. Existing S3 note JSON remains available as a fallback
+for records whose owner cannot be mapped safely. Mapped note records are stored
+in MongoDB with their original S3 string ID in `s3MetadataId`; MongoDB keeps its
+own document `_id`. Profile-photo S3 metadata is stored on the matching user.
+
+Run a read-only inventory first, then create the backup and review it before
+applying any changes:
+
+```powershell
+npm run migrate:s3-metadata:dry
+npm run migrate:s3-metadata:backup
+npm run migrate:s3-metadata -- --backup-id <backup-id-from-output>
+npm run verify:s3-metadata -- --backup-id <backup-id-from-output>
+```
+
+The dry run and reports do not modify MongoDB or S3. The backup contains note
+metadata and profile-photo fields only; it excludes authentication fields and
+passwords. Apply requires a completed backup ID, may be resumed with that same
+ID, checks for duplicate source IDs before creating its sparse unique index,
+and uses idempotent updates. Reports and privacy-safe error logs are written to
+`migration-reports/`. Objects or owners that cannot be matched are reported and
+left unchanged for manual review. The sync uses `MONGO_URI`, `AWS_S3_BUCKET`,
+`AWS_REGION` (default `ap-south-1`), and the AWS SDK credential provider chain.
 
 Technology| Purpose
 Node.js| JavaScript runtime

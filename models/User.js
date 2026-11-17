@@ -24,6 +24,14 @@ const userSchema = new mongoose.Schema(
     profilePhotoS3Key: { type: String },
     profilePhotoFileId: { type: mongoose.Schema.Types.ObjectId },
     profilePhotoContentType: { type: String },
+    profilePhotoS3Metadata: {
+      bucket: { type: String },
+      etag: { type: String },
+      lastModified: { type: Date },
+      storageClass: { type: String },
+      fileSize: { type: Number },
+      customMetadata: { type: Map, of: String },
+    },
     notesIndexInitialized: { type: Boolean, default: false },
   },
   { timestamps: true }
