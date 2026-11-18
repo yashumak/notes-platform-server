@@ -244,23 +244,6 @@ Getting Started
 
 1. Clone the repository
 
-| Variable | Required | Description |
-|---|---|---|
-| `PORT` | No | HTTP port; defaults to `5000` |
-| `NODE_ENV` | No | Set to `production` on deployed backend instances |
-| `MONGO_URI` | Yes | MongoDB connection string |
-| `JWT_SECRET` | Yes | Private signing secret of at least 32 bytes |
-| `AUTH_ENCRYPTION_PRIVATE_KEY` | Production | RSA private key (PEM) used only by the backend to decrypt login and registration fields |
-| `FRONTEND_URL` | Yes | Exact frontend origin for API CORS |
-| `AWS_REGION` | No | S3 region; defaults to `ap-south-1` |
-| `AWS_S3_BUCKET` | Yes | Private bucket used for note and profile-photo objects |
-| `AWS_ACCESS_KEY_ID` | No | Local IAM user key; omit when using an IAM role |
-| `AWS_SECRET_ACCESS_KEY` | No | Local IAM secret; omit when using an IAM role |
-| `MAX_NOTE_FILE_SIZE_BYTES` | No | Maximum note upload size in bytes |
-| `REDIS_URL` | Production | Private Redis/ElastiCache URL for shared rate-limit state |
-| `TRUST_PROXY_HOPS` | No | Exact trusted proxy hop count; defaults to `1` for one AWS load balancer |
-| `RATE_LIMIT_*` | No | Per-policy window and request limits; see `middlewares/rateLimiters.js` |
-
 git clone https://github.com/yashumak/notes-platform-server.git
 cd notes-platform-server
 
