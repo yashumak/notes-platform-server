@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
+import { loadRuntimeSecretsOrExit } from "../config/secrets.js";
 dotenv.config();
+await loadRuntimeSecretsOrExit();
 
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";

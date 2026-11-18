@@ -37,7 +37,7 @@ uploads, private file access, and administrator tools.
 
 ```text
 backend/
-├── config/          # auth.js, db.js
+├── config/          # auth.js, db.js, secrets.js (AWS Secrets Manager loader)
 ├── controllers/     # admin, auth, and notes controllers
 ├── middlewares/     # Authentication, validation, logging, and rate limits
 ├── models/          # AdminAuditLog, Note, User, and UserActivity
@@ -46,7 +46,8 @@ backend/
 ├── services/        # S3 storage operations
 ├── test/            # Automated tests
 ├── utils/           # Shared authentication, logging, and validation helpers
-├── index.js         # Express application and server startup
+├── index.js         # Entry point: loads .env / AWS Secrets Manager, then server.js
+├── server.js        # Express application and server startup
 └── package.json     # Scripts and dependencies
 ```
 
@@ -103,8 +104,8 @@ in frontend configuration or commit secrets.
 For development, `AUTH_ENCRYPTION_PRIVATE_KEY` can be omitted; the backend
 generates an ephemeral key pair. Login and registration sessions will not
 survive restarting the backend when using that generated key. Production must
-use a stable private key configured through the hosting provider's secret
-manager. `REDIS_URL` is optional in development, where rate limits use
+use a stable private key loaded from AWS Secrets Manager (see
+[Production secrets](#production-secrets-aws-secrets-manager)). `REDIS_URL` is optional in development, where rate limits use
 process-local memory; it is required in production.
 
 Start the development server:
@@ -122,7 +123,7 @@ server locally, use `npm start`.
 | --- | --- |
 | `npm run dev` | Start the development server with Nodemon |
 | `npm start` | Start the server |
-| `npm run build` | Check `index.js` syntax |
+| `npm run build` | Check `index.js`, `server.js`, and `config/secrets.js` syntax |
 | `npm test` | Run the backend test suite |
 | `npm run test:security` | Run security-focused tests |
 | `npm run seed:admin` | Create or explicitly promote an administrator |
@@ -227,7 +228,7 @@ Render| Backend deployment
 
 ```text
 backend/
-├── config/          # auth.js, db.js
+├── config/          # auth.js, db.js, secrets.js (AWS Secrets Manager loader)
 ├── controllers/     # auth, and notes controllers
 ├── middlewares/     # Authentication, validation, logging, and rate limits
 ├── models/          # AdminAuditLog, Note, User, and UserActivity
@@ -236,7 +237,8 @@ backend/
 ├── services/        # S3 storage operations
 ├── test/            # Automated tests
 ├── utils/           # Shared authentication, logging, and validation helpers
-├── index.js         # Express application and server startup
+├── index.js         # Entry point: loads .env / AWS Secrets Manager, then server.js
+├── server.js        # Express application and server startup
 └── package.json     # Scripts and dependencies
 ```
 Getting Started
@@ -260,6 +262,104 @@ Getting Started
 | `REDIS_URL` | Production | Private Redis/ElastiCache URL for shared rate-limit state |
 | `TRUST_PROXY_HOPS` | No | Exact trusted proxy hop count; defaults to `1` for one AWS load balancer |
 | `RATE_LIMIT_*` | No | Per-policy window and request limits; see `middlewares/rateLimiters.js` |
+| `AWS_ENDPOINT_URL` | No | AWS SDK endpoint override for local AWS emulators only; never set in production |
+
+Operational scripts also read `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME`,
+`ADMIN_UNIVERSITY`, `ADMIN_COURSE`, `ADMIN_YEAR`, and `ADMIN_PROMOTE_EXISTING`
+(`npm run seed:admin`). Supply them only for the one-off run; do not store them
+on the deployed service. The Python scraper (`scraper/main.py`) reads
+`AWS_REGION`, `AWS_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+`SCRAPER_UPLOADER_ID` from its own environment and does not use Secrets Manager.
+
+## Production secrets (AWS Secrets Manager)
+
+When `NODE_ENV=production`, `index.js` loads the existing AWS Secrets Manager
+secret `noteshub/production` (region `AWS_REGION`, default `ap-south-1`) before
+any application module is imported, so MongoDB, Redis, S3, JWT, and Express all
+start with the final configuration. `npm run seed:admin`, `npm run migrate:s3`,
+and the `s3-metadata` scripts load the same secret when run with
+`NODE_ENV=production`.
+
+Behavior of `config/secrets.js`:
+
+- One `SecretsManagerClient` and one `GetSecretValue` call per process; the
+  parsed result is cached in memory and is never fetched per request.
+- Only the keys listed below are copied into `process.env`; any other key in
+  the secret is ignored.
+- A variable already set in the deployment environment is never overwritten.
+- Startup exits with code 1 when the secret cannot be fetched, is not a JSON
+  object, contains non-scalar values, or a required key is still missing. The
+  log line contains an error code, the AWS error name, and missing key names,
+  never values.
+- Outside production Secrets Manager is not contacted; local `.env` files keep
+  working unchanged.
+
+Keys read from `noteshub/production` (exact names):
+
+| Key | Required in production |
+| --- | --- |
+| `MONGO_URI` | Yes |
+| `JWT_SECRET` | Yes |
+| `AUTH_ENCRYPTION_PRIVATE_KEY` | Yes (PEM; `\n` escapes are accepted) |
+| `REDIS_URL` | Yes |
+| `AWS_S3_BUCKET` | Yes |
+| `AWS_REGION`, `FRONTEND_URL`, `TRUST_PROXY_HOPS`, `MAX_NOTE_FILE_SIZE_BYTES`, `RATE_LIMIT_*_WINDOW_MS`, `RATE_LIMIT_*_MAX` | No (non-secret; may be in the secret or the deployment environment) |
+
+The Secrets Manager lookup itself uses `AWS_REGION` from the deployment
+environment (default `ap-south-1`). `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` are never read from the secret.
+
+### Bootstrap AWS identity
+
+The credentials used to read the secret cannot be stored inside it. On a
+non-AWS host (Render, Railway, etc.) create a dedicated IAM user and set
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as protected backend service
+variables, never in a frontend project or in Git. On AWS compute, use an IAM
+role and omit the static keys. The same identity is used for S3.
+
+Minimum IAM policy (replace the account ID and bucket name):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadNotesHubProductionSecret",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:ap-south-1:YOUR_ACCOUNT_ID:secret:noteshub/production-*"
+    },
+    {
+      "Sid": "NotesObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+      "Resource": "arn:aws:s3:::YOUR_BUCKET/*"
+    },
+    {
+      "Sid": "NotesBucketList",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::YOUR_BUCKET"
+    }
+  ]
+}
+```
+
+If the secret is encrypted with a customer-managed KMS key (not the default
+`aws/secretsmanager` key), also allow `kms:Decrypt` on that key ARN with the
+condition `"kms:ViaService": "secretsmanager.ap-south-1.amazonaws.com"`.
+
+### Production deployment variables
+
+Set these on the backend service; everything else comes from the secret:
+
+| Variable | Value |
+| --- | --- |
+| `NODE_ENV` | `production` |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Restricted IAM user (omit with an IAM role) |
+| `AWS_REGION` | `ap-south-1` (optional; default) |
+| `PORT` | Usually provided by the host |
+| `FRONTEND_URL`, `TRUST_PROXY_HOPS` | Unless stored in the secret |
 
 git clone https://github.com/yashumak/notes-platform-server.git
 cd notes-platform-server
@@ -385,7 +485,7 @@ or through the configured trusted TLS-terminating proxy). Configure TLS at the
 public load balancer/hosting edge and set the trusted proxy hop count accurately.
 Production MongoDB connections also require TLS with certificate verification.
 Production startup requires `AUTH_ENCRYPTION_PRIVATE_KEY`; store the PEM value
-in the backend host's secret manager and use the same key across backend
+in `noteshub/production` (AWS Secrets Manager) and use the same key across backend
 replicas. Its matching public key is intentionally exposed for the existing
 RSA-OAEP/AES-256-GCM authentication-payload protocol. Application-level
 encryption is not applied to ordinary profile or note metadata; use MongoDB

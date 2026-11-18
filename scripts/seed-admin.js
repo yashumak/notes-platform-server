@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
+import { loadRuntimeSecretsOrExit } from "../config/secrets.js";
 dotenv.config();
+await loadRuntimeSecretsOrExit();
 
 import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
