@@ -18,13 +18,29 @@ const authEncryptionKeyError = (code, message) => {
   return error;
 };
 
+const normalizePrivateKey = (value) => {
+  let key = value.trim().replace(/^\uFEFF/, "");
+  if (key.startsWith('"') && key.endsWith('"')) {
+    try {
+      const decoded = JSON.parse(key);
+      if (typeof decoded === "string") key = decoded;
+    } catch {
+      // Keep the original value so validation reports the malformed PEM.
+    }
+  }
+  return key
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\r\n?/g, "\n");
+};
+
 const getKeyPair = () => {
   if (keyPair) return keyPair;
 
-  const configuredPrivateKey = getAppSecrets().authEncryptionPrivateKey
-    ?.replace(/\\r\\n/g, "\n")
-    .replace(/\\n/g, "\n")
-    .replace(/\r\n?/g, "\n");
+  const rawPrivateKey = getAppSecrets().authEncryptionPrivateKey;
+  const configuredPrivateKey = rawPrivateKey
+    ? normalizePrivateKey(rawPrivateKey)
+    : undefined;
   if (configuredPrivateKey) {
     let privateKey;
     let publicKey;
