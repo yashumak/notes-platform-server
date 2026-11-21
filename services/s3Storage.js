@@ -2,7 +2,6 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
-  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -15,12 +14,6 @@ import { hasValidFileSignature, sanitizeFileName } from "../utils/fileValidation
 export const UPLOAD_URL_TTL_SECONDS = 300;
 export const DOWNLOAD_URL_TTL_SECONDS = 120;
 const SIGNATURE_CHECK_BYTES = 4096;
-const NOTE_METADATA_PREFIX = "metadata/";
-const LEGACY_NOTE_METADATA_PREFIX = "notes/metadata/";
-const USER_NOTE_INDEX_PREFIX = "metadata/users/";
-const NOTE_METADATA_READ_CONCURRENCY = 25;
-const NOTE_ID_PATTERN =
-  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[a-z0-9 -]{1,220})$/i;
 
 let client;
 let configuredRegion;
@@ -40,39 +33,6 @@ const getStorageConfig = () => {
   return { client, bucket };
 };
 
-const listNoteRecordEntries = async () => {
-  const { client: s3Client, bucket } = getStorageConfig();
-  const entriesByPrefix = await Promise.all(
-    [NOTE_METADATA_PREFIX, LEGACY_NOTE_METADATA_PREFIX].map(async (prefix) => {
-      const prefixEntries = [];
-      let continuationToken;
-      do {
-        const page = await s3Client.send(
-          new ListObjectsV2Command({
-            Bucket: bucket,
-            Prefix: prefix,
-            ContinuationToken: continuationToken,
-          })
-        );
-        for (const object of page.Contents || []) {
-          const id = object.Key?.slice(prefix.length).replace(/\.json$/, "");
-          if (!id || !NOTE_ID_PATTERN.test(id)) continue;
-          const lastModified = object.LastModified ? new Date(object.LastModified).getTime() : 0;
-          prefixEntries.push({ id, lastModified });
-        }
-        continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-      } while (continuationToken);
-      return prefixEntries;
-    })
-  );
-  const entries = new Map();
-  for (const entry of entriesByPrefix.flat()) {
-    const existing = entries.get(entry.id);
-    if (!existing || entry.lastModified > existing.lastModified) entries.set(entry.id, entry);
-  }
-  return [...entries.values()].sort((first, second) => second.lastModified - first.lastModified);
-};
-
 const formatContentDisposition = (fileName) => {
   const safeName = sanitizeFileName(fileName);
   const asciiName = safeName.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
@@ -88,24 +48,13 @@ const invalidUploadError = () => {
   return error;
 };
 
-const getUserNoteIndexPrefix = (uploadedBy) => {
-  const ownerId = String(uploadedBy || "");
-  if (!/^[0-9a-f]{24}$/i.test(ownerId)) return null;
-  return `${USER_NOTE_INDEX_PREFIX}${ownerId}/`;
-};
-
-const toS3NoteRecord = (record) => {
+const serializeStoredNote = (record) => {
   if (!record) return null;
   const note = typeof record.toObject === "function" ? record.toObject() : record;
-  return { ...note, _id: note.s3MetadataId || String(note._id) };
+  return { ...note, _id: String(note.s3MetadataId || note._id) };
 };
 
-const getMongoNoteRecord = async (id) => {
-  const record = await Note.findOne({ s3MetadataId: id }).lean();
-  return toS3NoteRecord(record);
-};
-
-const saveMongoNoteRecord = async (note, bucket) => {
+const saveNoteRecord = async (note) => {
   const sourceId = String(note.s3MetadataId || note._id || "");
   const ownerId = String(note.uploadedBy || "");
   if (!sourceId || !note.s3Key || !mongoose.isValidObjectId(ownerId)) {
@@ -147,7 +96,7 @@ const saveMongoNoteRecord = async (note, bucket) => {
     uploadedBy: new mongoose.Types.ObjectId(ownerId),
     s3ObjectMetadata: {
       ...(note.s3ObjectMetadata || {}),
-      bucket: note.s3ObjectMetadata?.bucket || bucket,
+      bucket: note.s3ObjectMetadata?.bucket || (await getStorageConfig()).bucket,
     },
   };
   for (const field of fields) {
@@ -158,13 +107,11 @@ const saveMongoNoteRecord = async (note, bucket) => {
     existing ? { _id: existing._id } : { s3Key: note.s3Key },
     {
       $set: update,
-      ...(!existing
-        ? { $setOnInsert: { _id: new mongoose.Types.ObjectId() } }
-        : {}),
+      ...(!existing ? { $setOnInsert: { _id: new mongoose.Types.ObjectId() } } : {}),
     },
     { new: true, upsert: !existing, runValidators: true, timestamps: false }
   ).lean();
-  return toS3NoteRecord(saved);
+  return serializeStoredNote(saved);
 };
 
 export const s3Storage = {
@@ -282,159 +229,49 @@ export const s3Storage = {
   },
 
   async putNoteRecord(note) {
-    const { client: s3Client, bucket } = getStorageConfig();
-    const saved = await saveMongoNoteRecord(note, bucket);
-    if (saved) return saved;
-
-    await s3Client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: `${NOTE_METADATA_PREFIX}${note._id}.json`,
-        Body: JSON.stringify(note),
-        ContentType: "application/json",
-        ServerSideEncryption: "AES256",
-      })
-    );
-    await this.putUserNoteIndex(note);
-  },
-
-  async putUserNoteIndex(note) {
-    if (await Note.exists({ s3MetadataId: String(note._id || "") })) return;
-    const prefix = getUserNoteIndexPrefix(note.uploadedBy);
-    const id = String(note._id || "");
-    if (!prefix || !NOTE_ID_PATTERN.test(id)) return;
-
-    const { client: s3Client, bucket } = getStorageConfig();
-    await s3Client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: `${prefix}${id}.json`,
-        Body: JSON.stringify({ _id: id }),
-        ContentType: "application/json",
-        ServerSideEncryption: "AES256",
-      })
-    );
-  },
-
-  async listNoteRecordsForUser({ uploadedBy }) {
-    const prefix = getUserNoteIndexPrefix(uploadedBy);
-    if (!prefix) throw new Error("Invalid note owner ID");
-
-    const { client: s3Client, bucket } = getStorageConfig();
-    const ids = [];
-    let continuationToken;
-    do {
-      const page = await s3Client.send(
-        new ListObjectsV2Command({
-          Bucket: bucket,
-          Prefix: prefix,
-          ContinuationToken: continuationToken,
-        })
-      );
-      for (const object of page.Contents || []) {
-        const id = object.Key?.slice(prefix.length).replace(/\.json$/, "");
-        if (id && NOTE_ID_PATTERN.test(id)) ids.push(id);
-      }
-      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-    } while (continuationToken);
-
-    const importedRecords = await Note.find({
-      uploadedBy,
-      s3MetadataId: { $exists: true, $ne: "" },
-    }).select("s3MetadataId").lean();
-    const importedIds = new Set(importedRecords.map((record) => record.s3MetadataId));
-    const records = [];
-    for (let index = 0; index < ids.length; index += NOTE_METADATA_READ_CONCURRENCY) {
-      const batch = ids.slice(index, index + NOTE_METADATA_READ_CONCURRENCY);
-      const notes = await Promise.all(
-        batch
-          .filter((id) => !importedIds.has(id))
-          .map((id) => this.getS3NoteRecord(id))
-      );
-      records.push(
-        ...notes.filter((note) => note && String(note.uploadedBy) === String(uploadedBy))
-      );
-    }
-    return records;
+    return saveNoteRecord(note);
   },
 
   async getNoteRecord(id) {
-    if (typeof id !== "string" || !NOTE_ID_PATTERN.test(id)) return null;
-    const mongoRecord = await getMongoNoteRecord(id);
-    if (mongoRecord) return mongoRecord;
-    return this.getS3NoteRecord(id);
-  },
-
-  async getS3NoteRecord(id) {
-    if (typeof id !== "string" || !NOTE_ID_PATTERN.test(id)) return null;
-    const { client: s3Client, bucket } = getStorageConfig();
-    for (const prefix of [NOTE_METADATA_PREFIX, LEGACY_NOTE_METADATA_PREFIX]) {
-      try {
-        const result = await s3Client.send(
-          new GetObjectCommand({ Bucket: bucket, Key: `${prefix}${id}.json` })
-        );
-        if (!result.Body) throw new Error("S3 note metadata object is empty");
-        return JSON.parse(await result.Body.transformToString());
-      } catch (error) {
-        if (error?.name === "NoSuchKey" || error?.$metadata?.httpStatusCode === 404) continue;
-        throw error;
-      }
-    }
-    return null;
+    if (typeof id !== "string") return null;
+    const record = await Note.findOne({
+      $or: [{ _id: id }, { s3MetadataId: id }],
+    }).lean();
+    return serializeStoredNote(record);
   },
 
   async listNoteRecords() {
-    const entries = await listNoteRecordEntries();
-    const importedRecords = await Note.find({
-      s3MetadataId: { $in: entries.map(({ id }) => id) },
-    }).select("s3MetadataId").lean();
-    const importedIds = new Set(importedRecords.map((record) => record.s3MetadataId));
-    const unimportedEntries = entries.filter(({ id }) => !importedIds.has(id));
-    const records = [];
-    for (let index = 0; index < unimportedEntries.length; index += NOTE_METADATA_READ_CONCURRENCY) {
-      const batch = unimportedEntries.slice(index, index + NOTE_METADATA_READ_CONCURRENCY);
-      const notes = await Promise.all(batch.map(({ id }) => this.getS3NoteRecord(id)));
-      records.push(...notes.filter(Boolean));
-    }
-    return records;
+    const records = await Note.find({
+      uploadStatus: { $ne: "deleting" },
+    }).lean();
+    return records.map(serializeStoredNote);
   },
 
   async listNoteRecordPage({ offset, limit }) {
-    const entries = await listNoteRecordEntries();
-    const importedRecords = await Note.find({
-      s3MetadataId: { $in: entries.map(({ id }) => id) },
-    }).select("s3MetadataId").lean();
-    const importedIds = new Set(importedRecords.map((record) => record.s3MetadataId));
-    const remainingEntries = entries.filter(({ id }) => !importedIds.has(id));
-    const page = remainingEntries.slice(offset, offset + limit);
-    const records = await Promise.all(page.map(({ id }) => this.getS3NoteRecord(id)));
+    const [records, total] = await Promise.all([
+      Note.find({ uploadStatus: { $ne: "deleting" } })
+        .sort({ createdAt: -1 })
+        .skip(offset)
+        .limit(limit)
+        .lean(),
+      Note.countDocuments({ uploadStatus: { $ne: "deleting" } }),
+    ]);
     return {
-      records: records.filter(Boolean),
-      total: remainingEntries.length,
+      records: records.map(serializeStoredNote),
+      total,
     };
   },
 
+  async listNoteRecordsForUser({ uploadedBy }) {
+    const records = await Note.find({
+      uploadedBy,
+      uploadStatus: { $ne: "deleting" },
+    }).lean();
+    return records.map(serializeStoredNote);
+  },
+
   async deleteNoteRecord(id, { uploadedBy } = {}) {
-    if (typeof id !== "string" || !NOTE_ID_PATTERN.test(id)) {
-      throw new Error("Invalid S3 note record ID");
-    }
-    const { client: s3Client, bucket } = getStorageConfig();
-    const deleteOperations = [
-      [NOTE_METADATA_PREFIX, LEGACY_NOTE_METADATA_PREFIX].map((prefix) =>
-        s3Client.send(
-          new DeleteObjectCommand({ Bucket: bucket, Key: `${prefix}${id}.json` })
-        )
-      ),
-    ];
-    const userIndexPrefix = getUserNoteIndexPrefix(uploadedBy);
-    if (userIndexPrefix) {
-      deleteOperations.push(
-        s3Client.send(
-          new DeleteObjectCommand({ Bucket: bucket, Key: `${userIndexPrefix}${id}.json` })
-        )
-      );
-    }
-    await Promise.all(deleteOperations.flat());
-    await Note.deleteOne({ s3MetadataId: id });
+    if (typeof id !== "string") throw new Error("Invalid note record ID");
+    await Note.deleteOne({ $or: [{ _id: id }, { s3MetadataId: id }] });
   },
 };

@@ -127,15 +127,11 @@ const observeNotesOperation = (operation, promise) =>
 
 export const getNoteStats = async (_req, res) => {
   try {
-    const s3Notes = (await observeNotesOperation(
-      "notes.stats_s3_list_failed",
-      s3Storage.listNoteRecords()
-    )).filter((note) => note.visibility !== "private" && note.uploadStatus !== "deleting");
     const sharedNotes = {
       visibility: { $ne: "private" },
       uploadStatus: { $ne: "deleting" },
     };
-    const [legacyTotal, universities, studyTypes] = await Promise.all([
+    const [total, universities, studyTypes] = await Promise.all([
       observeNotesOperation("notes.stats_mongo_count_failed", Note.countDocuments(sharedNotes)),
       observeNotesOperation("notes.stats_mongo_universities_failed", Note.distinct("university", sharedNotes)),
       observeNotesOperation("notes.stats_mongo_study_types_failed", Note.distinct("studyType", sharedNotes)),
@@ -144,23 +140,19 @@ export const getNoteStats = async (_req, res) => {
     res.json({
       success: true,
       stats: {
-        total: legacyTotal + s3Notes.length,
-        universities: new Set([
-          ...universities.filter((value) => typeof value === "string" && value.trim()),
-          ...s3Notes.map((note) => note.university).filter((value) => typeof value === "string" && value.trim()),
-        ]).size,
-        studyTypes: new Set([
-          ...studyTypes.filter((value) => typeof value === "string" && value.trim()),
-          ...s3Notes.map((note) => note.studyType).filter((value) => typeof value === "string" && value.trim()),
-        ]).size,
+        total,
+        universities: new Set(
+          universities.filter((value) => typeof value === "string" && value.trim())
+        ).size,
+        studyTypes: new Set(
+          studyTypes.filter((value) => typeof value === "string" && value.trim())
+        ).size,
       },
     });
   } catch (error) {
     logNotesOperationFailure("notes.stats_failed", error);
-    res.status(isStorageConfigurationError(error) ? 503 : 500).json({
-      message: isStorageConfigurationError(error)
-        ? "Notes storage is not configured"
-        : "Could not load note statistics",
+    res.status(500).json({
+      message: "Could not load note statistics",
     });
   }
 };
@@ -255,7 +247,6 @@ export const completeNoteUpload = async (req, res) => {
       ) {
         return res.status(404).json({ message: "Note not found" });
       }
-      await s3Storage.putUserNoteIndex(existingNote);
       return res.status(200).json({
         success: true,
         message: "Note upload was already completed",
@@ -386,25 +377,14 @@ export const listNotes = async (req, res) => {
     let notes;
     let total;
     if (hasFilters) {
-      const [s3Notes, legacyNotes] = await Promise.all([
-        observeNotesOperation("notes.list_s3_failed", s3Storage.listNoteRecords()),
-        observeNotesOperation("notes.list_mongo_failed", Note.find(publicNotesQuery)
-          .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
-        ),
-      ]);
-      const matchingNotes = [
-        ...s3Notes.filter(
-          (note) => note.visibility !== "private" &&
-            note.uploadStatus !== "deleting" &&
-            noteMatchesFilters(note, filters)
-        ),
-        ...legacyNotes.filter((note) => noteMatchesFilters(note, filters)),
-      ].sort(compareNotesByCreatedAt);
+      const allNotes = await observeNotesOperation("notes.list_mongo_failed", Note.find(publicNotesQuery)
+        .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt")
+        .lean());
+      const matchingNotes = allNotes.filter((note) => noteMatchesFilters(note, filters));
       total = matchingNotes.length;
       notes = matchingNotes.slice(offset, offset + limit);
     } else {
-      const [s3Page, legacyNotes, legacyTotal] = await Promise.all([
-        observeNotesOperation("notes.list_s3_failed", s3Storage.listNoteRecordPage({ offset, limit })),
+      const [legacyNotes, legacyTotal] = await Promise.all([
         observeNotesOperation("notes.list_mongo_page_failed", Note.find(publicNotesQuery)
           .sort({ createdAt: -1 })
           .skip(offset)
@@ -412,13 +392,8 @@ export const listNotes = async (req, res) => {
           .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt")),
         observeNotesOperation("notes.list_mongo_count_failed", Note.countDocuments(publicNotesQuery)),
       ]);
-      notes = [
-        ...s3Page.records.filter(
-          (note) => note.visibility !== "private" && note.uploadStatus !== "deleting"
-        ),
-        ...legacyNotes,
-      ].sort(compareNotesByCreatedAt).slice(0, limit);
-      total = s3Page.total + legacyTotal;
+      notes = legacyNotes;
+      total = legacyTotal;
     }
 
     res.json({
@@ -433,10 +408,8 @@ export const listNotes = async (req, res) => {
     });
   } catch (error) {
     logNotesOperationFailure("notes.list_failed", error);
-    res.status(isStorageConfigurationError(error) ? 503 : 500).json({
-      message: isStorageConfigurationError(error)
-        ? "Notes storage is not configured"
-        : "Could not load notes",
+    res.status(500).json({
+      message: "Could not load notes",
     });
   }
 };
@@ -449,46 +422,23 @@ export const listMyNotes = async (req, res) => {
       : 1;
     const limit = 30;
     const offset = (page - 1) * limit;
-    const account = await User.findById(req.user.id).select("notesIndexInitialized");
+    const account = await User.findById(req.user.id);
     if (!account) return res.status(404).json({ message: "User not found" });
 
-    let s3Notes;
-    if (account.notesIndexInitialized) {
-      s3Notes = await s3Storage.listNoteRecordsForUser({ uploadedBy: req.user.id });
-    } else {
-      const allNotes = await s3Storage.listNoteRecords();
-      s3Notes = allNotes.filter(
-        (note) => String(note.uploadedBy) === String(req.user.id)
-      );
-      await Promise.all(s3Notes.map((note) => s3Storage.putUserNoteIndex(note)));
-      await User.updateOne(
-        { _id: req.user.id },
-        { $set: { notesIndexInitialized: true } }
-      );
-    }
-
-    const legacyQuery = { uploadedBy: req.user.id, uploadStatus: { $ne: "deleting" } };
-    const [legacyNotes, legacyTotal] = await Promise.all([
-      Note.find(legacyQuery)
-      .sort({ createdAt: -1 })
-      .limit(offset + limit)
-      .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
-      Note.countDocuments(legacyQuery),
+    const userNotesQuery = { uploadedBy: req.user.id, uploadStatus: { $ne: "deleting" } };
+    const [notes, total] = await Promise.all([
+      Note.find(userNotesQuery)
+        .sort({ createdAt: -1 })
+        .skip(offset)
+        .limit(limit)
+        .select("title description fileName fileSize university course subject category studyType year tags visibility createdAt"),
+      Note.countDocuments(userNotesQuery),
     ]);
-    const notes = [
-      ...s3Notes.filter(
-        (note) =>
-          String(note.uploadedBy) === String(req.user.id) &&
-          note.uploadStatus !== "deleting"
-      ),
-      ...legacyNotes,
-    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    const total = s3Notes.filter((note) => note.uploadStatus !== "deleting").length + legacyTotal;
 
     res.setHeader("Cache-Control", "private, no-store");
     res.json({
       success: true,
-      notes: notes.slice(offset, offset + limit).map((note) => serializeNote(note)),
+      notes: notes.map((note) => serializeNote(note)),
       pagination: {
         page,
         limit,
@@ -504,22 +454,6 @@ export const listMyNotes = async (req, res) => {
 
 export const deleteMyNote = async (req, res) => {
   try {
-    const s3Note = await s3Storage.getNoteRecord(req.params.id);
-    if (s3Note) {
-      if (String(s3Note.uploadedBy) !== String(req.user.id)) {
-        return res.status(404).json({ message: "Note not found" });
-      }
-      if (!s3Note.s3Key || !s3Note._id) {
-        logError("notes.s3_metadata_invalid");
-        return res.status(500).json({ message: "Could not delete note" });
-      }
-      await s3Storage.putNoteRecord({ ...s3Note, uploadStatus: "deleting" });
-      await s3Storage.deleteObject(s3Note.s3Key);
-      await s3Storage.deleteNoteRecord(s3Note._id, { uploadedBy: s3Note.uploadedBy });
-      recordUserActivity(req.user.id, "NOTE_DELETE", s3Note._id);
-      return res.json({ success: true, message: "Note deleted successfully" });
-    }
-
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ message: "Invalid note ID" });
     }
@@ -529,7 +463,7 @@ export const deleteMyNote = async (req, res) => {
       uploadedBy: req.user.id,
     }).select("fileId s3Key storageProvider");
 
-    if (!note) {
+    if (!note || note.uploadStatus === "deleting") {
       return res.status(404).json({ message: "Note not found" });
     }
 
@@ -540,12 +474,14 @@ export const deleteMyNote = async (req, res) => {
       );
       await s3Storage.deleteObject(note.s3Key);
       await Note.deleteOne({ _id: req.params.id, uploadedBy: req.user.id });
-    } else {
+    } else if (note.fileId) {
       await Note.updateOne(
         { _id: req.params.id, uploadedBy: req.user.id },
         { $set: { uploadStatus: "deleting" } }
       );
       await getNoteFilesBucket().delete(note.fileId);
+      await Note.deleteOne({ _id: req.params.id, uploadedBy: req.user.id });
+    } else {
       await Note.deleteOne({ _id: req.params.id, uploadedBy: req.user.id });
     }
 
@@ -559,25 +495,6 @@ export const deleteMyNote = async (req, res) => {
 
 export const downloadNoteFile = async (req, res) => {
   try {
-    const s3Note = await s3Storage.getNoteRecord(req.params.id);
-    if (s3Note) {
-      if (
-        s3Note.uploadStatus === "deleting" ||
-        (s3Note.visibility === "private" &&
-          (!req.user || String(s3Note.uploadedBy) !== String(req.user.id)))
-      ) {
-        return res.status(404).json({ message: "Note file not found" });
-      }
-      const downloadUrl = await s3Storage.createDownloadUrl({
-        key: s3Note.s3Key,
-        fileName: s3Note.fileName,
-        contentType: s3Note.contentType,
-      });
-      recordUserActivity(req.user?.id, "NOTE_DOWNLOAD", req.params.id);
-      res.set("Cache-Control", "private, no-store");
-      return res.redirect(302, downloadUrl);
-    }
-
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ message: "Invalid note ID" });
     }

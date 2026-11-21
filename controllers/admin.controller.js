@@ -535,9 +535,6 @@ export const listNotes = async (req, res) => {
   const search = cleanQuery(req.query.q);
   const sortBy = ["createdAt", "title", "fileSize"].includes(req.query.sort) ? req.query.sort : "createdAt";
   const direction = req.query.order === "asc" ? 1 : -1;
-  const hasFilters = ["q", "university", "course", "subject", "category", "year", "visibility", "contentType", "from", "to", "status"]
-    .some((key) => cleanQuery(req.query[key]));
-  const requiresFullS3Search = hasFilters || sortBy !== "createdAt" || direction !== -1;
   try {
     let uploaderIds = [];
     if (search) {
@@ -547,45 +544,17 @@ export const listNotes = async (req, res) => {
     }
     const filter = noteQuery(req.query, uploaderIds);
     if (!filter) return res.status(400).json({ message: "Invalid note date filter" });
-    const s3Page = requiresFullS3Search
-      ? null
-      : await s3Storage.listNoteRecordPage({ offset: 0, limit: skip + limit });
-    const s3Notes = s3Page
-      ? s3Page.records
-      : await s3Storage.listNoteRecords();
-    const userIds = [...new Set(s3Notes.map((note) => String(note.uploadedBy)).filter((id) => mongoose.isValidObjectId(id)))];
-    const uploaders = await User.find({ _id: { $in: userIds } }).select("name email");
-    const uploaderById = new Map(uploaders.map((user) => [String(user._id), user]));
-    const filteredS3 = s3Notes
-      .filter((note) => matchesS3Note(note, req.query, uploaderById.get(String(note.uploadedBy))))
-      .map((note) => noteDto(note, uploaderById.get(String(note.uploadedBy))));
     const [mongoNotes, mongoTotal] = await Promise.all([
       Note.find(filter).select("title description fileName contentType fileSize university course subject category studyType year tags visibility uploadStatus uploadedBy createdAt")
-        .sort({ [sortBy]: direction }).limit(skip + limit),
+        .sort({ [sortBy]: direction }).skip(skip).limit(limit),
       Note.countDocuments(filter),
     ]);
     const mongoUploaderIds = [...new Set(mongoNotes.map((note) => String(note.uploadedBy)))];
     const mongoUploaders = await User.find({ _id: { $in: mongoUploaderIds } }).select("name email");
     const mongoUploaderById = new Map(mongoUploaders.map((user) => [String(user._id), user]));
-    const merged = [
-      ...filteredS3,
-      ...mongoNotes.map((note) => noteDto(note, mongoUploaderById.get(String(note.uploadedBy)))),
-    ].sort((a, b) => {
-      const first = sortBy === "createdAt" ? new Date(a.uploadedAt).getTime() : a[sortBy];
-      const second = sortBy === "createdAt" ? new Date(b.uploadedAt).getTime() : b[sortBy];
-      const comparison = typeof first === "string" && typeof second === "string"
-        ? first.localeCompare(second)
-        : Number(first || 0) - Number(second || 0);
-      return comparison * direction;
-    });
+    const merged = mongoNotes.map((note) => noteDto(note, mongoUploaderById.get(String(note.uploadedBy))));
     res.setHeader("Cache-Control", "private, no-store");
-    return sendPage(
-      res,
-      merged.slice(skip, skip + limit),
-      (s3Page?.total ?? filteredS3.length) + mongoTotal,
-      page,
-      limit
-    );
+    return sendPage(res, merged, mongoTotal, page, limit);
   } catch {
     logError("admin.notes_list_failed");
     return res.status(503).json({ message: "Could not load notes from the configured storage" });
@@ -593,8 +562,6 @@ export const listNotes = async (req, res) => {
 };
 
 const findAdminNote = async (id) => {
-  const s3Note = await s3Storage.getNoteRecord(id);
-  if (s3Note) return { kind: "s3", note: s3Note };
   if (!mongoose.isValidObjectId(id)) return null;
   const note = await Note.findById(id);
   return note ? { kind: "mongo", note } : null;
@@ -647,11 +614,7 @@ export const updateNote = async (req, res) => {
     const found = await findAdminNote(req.params.id);
     if (!found || found.note.uploadStatus === "deleting") return res.status(404).json({ message: "Note not found" });
     await audit(req, "UPDATE_NOTE", "NOTE", req.params.id, fields, async () => {
-      if (found.kind === "s3") {
-        await s3Storage.putNoteRecord({ ...found.note, ...updates });
-      } else {
-        await Note.updateOne({ _id: found.note._id }, { $set: updates }, { runValidators: true });
-      }
+      await Note.updateOne({ _id: found.note._id }, { $set: updates }, { runValidators: true });
     });
     return res.json({ message: "Note updated" });
   } catch {
@@ -669,42 +632,29 @@ export const deleteNote = async (req, res) => {
       return res.status(409).json({ message: "Note file association is invalid" });
     }
     await audit(req, "DELETE_NOTE", "NOTE", req.params.id, [], async () => {
-      if (found.kind === "s3") {
-        await s3Storage.putNoteRecord({ ...note, uploadStatus: "deleting" });
-        const [otherS3References, otherMongoReferences] = await Promise.all([
-          s3Storage.listNoteRecords(),
-          Note.countDocuments({ s3Key: note.s3Key, _id: { $ne: note._id }, uploadStatus: { $ne: "deleting" } }),
-        ]);
-        const shared = otherMongoReferences > 0 || otherS3References.some(
-          (item) => String(item._id) !== String(note._id) && item.s3Key === note.s3Key
-        );
+      note.uploadStatus = "deleting";
+      await note.save();
+      if (note.s3Key) {
+        const shared = await Note.exists({
+          s3Key: note.s3Key,
+          _id: { $ne: note._id },
+          uploadStatus: { $ne: "deleting" },
+        });
         if (!shared) await s3Storage.deleteObject(note.s3Key);
-        await s3Storage.deleteNoteRecord(note._id, { uploadedBy: note.uploadedBy });
-      } else {
-        note.uploadStatus = "deleting";
-        await note.save();
-        if (note.s3Key) {
-          const shared = await Note.exists({
-            s3Key: note.s3Key,
-            _id: { $ne: note._id },
-            uploadStatus: { $ne: "deleting" },
-          });
-          if (!shared) await s3Storage.deleteObject(note.s3Key);
-        } else if (note.fileId) {
-          const shared = await Note.exists({
-            fileId: note.fileId,
-            _id: { $ne: note._id },
-            uploadStatus: { $ne: "deleting" },
-          });
-          if (!shared) {
-            const files = mongoose.connection.db.collection("noteFiles.files");
-            if (await files.findOne({ _id: note.fileId })) {
-              await new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: "noteFiles" }).delete(note.fileId);
-            }
+      } else if (note.fileId) {
+        const shared = await Note.exists({
+          fileId: note.fileId,
+          _id: { $ne: note._id },
+          uploadStatus: { $ne: "deleting" },
+        });
+        if (!shared) {
+          const files = mongoose.connection.db.collection("noteFiles.files");
+          if (await files.findOne({ _id: note.fileId })) {
+            await new mongoose.mongo.GridFSBucket(mongoose.connection.db, { bucketName: "noteFiles" }).delete(note.fileId);
           }
         }
-        await Note.deleteOne({ _id: note._id, uploadStatus: "deleting" });
       }
+      await Note.deleteOne({ _id: note._id, uploadStatus: "deleting" });
     });
     return res.json({ message: "Note and its associated file were deleted" });
   } catch {
@@ -720,7 +670,6 @@ export const getDashboard = async (_req, res) => {
       mongoNoteStats,
       recentUsers,
       recentMongoNotes,
-      s3Notes,
       recentAdminActions,
       trackedDownloads,
     ] = await Promise.all([
@@ -734,32 +683,23 @@ export const getDashboard = async (_req, res) => {
       ]),
       User.find({ deletedAt: null }).select("name email university createdAt").sort({ createdAt: -1 }).limit(8),
       Note.find({ uploadStatus: { $ne: "deleting" } }).select("title fileName fileSize visibility createdAt uploadedBy").sort({ createdAt: -1 }).limit(8),
-      s3Storage.listNoteRecords(),
       AdminAuditLog.find().populate({ path: "adminId", select: "name email" }).sort({ timestamp: -1 }).limit(6),
       UserActivity.countDocuments({ eventType: "NOTE_DOWNLOAD", success: true }),
     ]);
     const statusCounts = Object.fromEntries(userStats.map((item) => [item._id || "active", item.count]));
-    const s3ActiveNotes = s3Notes.filter((note) => note.uploadStatus !== "deleting");
     const publicCount = mongoNoteStats.find((item) => item._id !== "private")?.count || 0;
     const privateCount = mongoNoteStats.find((item) => item._id === "private")?.count || 0;
-    const s3PublicCount = s3ActiveNotes.filter((note) => note.visibility !== "private").length;
-    const s3PrivateCount = s3ActiveNotes.filter((note) => note.visibility === "private").length;
-    const s3Bytes = s3ActiveNotes.reduce((total, note) => total + (Number(note.fileSize) || 0), 0);
     const mongoBytes = mongoNoteStats.reduce((total, item) => total + (item.storageBytes || 0), 0);
-    const recentS3Records = s3ActiveNotes
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, 8);
     const recentUsersOut = recentUsers.map(userDto);
-    const recentUploaderIds = [...new Set([
-      ...recentMongoNotes.map((note) => String(note.uploadedBy)),
-      ...recentS3Records.map((note) => String(note.uploadedBy)),
-    ].filter((id) => mongoose.isValidObjectId(id)))];
+    const recentUploaderIds = [...new Set(
+      recentMongoNotes.map((note) => String(note.uploadedBy))
+    ).filter((id) => mongoose.isValidObjectId(id))];
     const mongoUploaders = await User.find({ _id: { $in: recentUploaderIds } }).select("name email");
     const uploaderById = new Map(mongoUploaders.map((user) => [String(user._id), user]));
-    const combinedRecentNotes = [
-      ...recentS3Records.map((note) => noteDto(note, uploaderById.get(String(note.uploadedBy)))),
-      ...recentMongoNotes.map((note) => noteDto(note, uploaderById.get(String(note.uploadedBy)))),
-    ].sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()).slice(0, 8);
+    const combinedRecentNotes = recentMongoNotes
+      .map((note) => noteDto(note, uploaderById.get(String(note.uploadedBy))))
+      .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime())
+      .slice(0, 8);
     const since = new Date();
     since.setUTCDate(1);
     since.setUTCHours(0, 0, 0, 0);
@@ -775,13 +715,13 @@ export const getDashboard = async (_req, res) => {
         activeUsers: statusCounts.active || 0,
         suspendedUsers: statusCounts.suspended || 0,
         newRegistrationsThisMonth: newUsers,
-        totalNotes: mongoNoteStats.reduce((sum, item) => sum + item.count, 0) + s3ActiveNotes.length,
-        publicNotes: publicCount + s3PublicCount,
-        privateNotes: privateCount + s3PrivateCount,
-        noteFiles: s3ActiveNotes.length + mongoNoteStats.reduce((sum, item) => sum + item.count, 0),
+        totalNotes: mongoNoteStats.reduce((sum, item) => sum + item.count, 0),
+        publicNotes: publicCount,
+        privateNotes: privateCount,
+        noteFiles: mongoNoteStats.reduce((sum, item) => sum + item.count, 0),
         profilePhotos: photos,
         trackedDownloads,
-        knownNoteStorageBytes: mongoBytes + s3Bytes,
+        knownNoteStorageBytes: mongoBytes,
       },
       recentRegistrations: recentUsersOut,
       recentNotes: combinedRecentNotes,

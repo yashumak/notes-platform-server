@@ -1113,7 +1113,7 @@ test("profile photos are stored in the photos S3 prefix with encryption", async 
   assert.ok(commands[1] instanceof HeadObjectCommand);
 });
 
-test("notes without a matching Mongo user retain the S3 metadata fallback", async () => {
+test("notes without a matching Mongo user do not write metadata to S3", async () => {
   const savedEnvironment = {
     AWS_REGION: process.env.AWS_REGION,
     AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
@@ -1122,7 +1122,6 @@ test("notes without a matching Mongo user retain the S3 metadata fallback", asyn
   };
   const originalSend = S3Client.prototype.send;
   const originalUserExists = User.exists;
-  const originalNoteExists = Note.exists;
   const uploadedCommands = [];
   const ownerId = new mongoose.Types.ObjectId().toString();
   const noteId = "7c78e950-3026-4fef-8290-0e4508aa2718";
@@ -1132,25 +1131,28 @@ test("notes without a matching Mongo user retain the S3 metadata fallback", asyn
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
   S3Client.prototype.send = async (command) => { uploadedCommands.push(command); };
   User.exists = async () => null;
-  Note.exists = async () => false;
 
   try {
-    await s3Storage.putNoteRecord({ _id: noteId, uploadedBy: ownerId });
+    const saved = await s3Storage.putNoteRecord({
+      _id: noteId,
+      uploadedBy: ownerId,
+      s3Key: "notes/test.pdf",
+      title: "Test",
+      fileName: "test.pdf",
+      contentType: "application/pdf",
+      fileSize: 1,
+    });
+    assert.equal(saved, null);
   } finally {
     S3Client.prototype.send = originalSend;
     User.exists = originalUserExists;
-    Note.exists = originalNoteExists;
     for (const [name, value] of Object.entries(savedEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
   }
 
-  assert.equal(uploadedCommands.length, 2);
-  assert.ok(uploadedCommands.every((command) => command instanceof PutObjectCommand));
-  assert.equal(uploadedCommands[0].input.Key, `metadata/${noteId}.json`);
-  assert.equal(uploadedCommands[1].input.Key, `metadata/users/${ownerId}/${noteId}.json`);
-  assert.deepEqual(JSON.parse(uploadedCommands[1].input.Body.toString()), { _id: noteId });
+  assert.equal(uploadedCommands.length, 0);
 });
 
 test("note records use MongoDB when their owner can be resolved", async () => {
@@ -1210,90 +1212,50 @@ test("note records use MongoDB when their owner can be resolved", async () => {
   }
 });
 
-test("user note index reads only that account's indexed note records", async () => {
-  const savedEnvironment = {
-    AWS_REGION: process.env.AWS_REGION,
-    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-  };
-  const originalSend = S3Client.prototype.send;
-  const originalFind = Note.find;
+test("user note index reads only that account's indexed note records from MongoDB", async () => {
   const ownerId = new mongoose.Types.ObjectId().toString();
   const noteId = "7c78e950-3026-4fef-8290-0e4508aa2718";
-  const listedPrefixes = [];
-  const fetchedKeys = [];
-  process.env.AWS_REGION = "ap-south-1";
-  process.env.AWS_S3_BUCKET = "notes-test-bucket";
-  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
-  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  const originalFind = Note.find;
   Note.find = () => ({
-    select() { return this; },
-    lean: async () => [],
+    lean: async () => [{
+      _id: noteId,
+      s3MetadataId: noteId,
+      uploadedBy: ownerId,
+      title: "My upload",
+      visibility: "private",
+      uploadStatus: "active",
+    }],
   });
-  S3Client.prototype.send = async (command) => {
-    if (command instanceof ListObjectsV2Command) {
-      listedPrefixes.push(command.input.Prefix);
-      return { Contents: [{ Key: `${command.input.Prefix}${noteId}.json` }] };
-    }
-    if (command instanceof GetObjectCommand) {
-      fetchedKeys.push(command.input.Key);
-      return {
-        Body: {
-          transformToString: async () => JSON.stringify({
-            _id: noteId,
-            title: "My upload",
-            uploadedBy: ownerId,
-            visibility: "private",
-          }),
-        },
-      };
-    }
-    throw new Error("Unexpected S3 command");
-  };
 
   try {
     const records = await s3Storage.listNoteRecordsForUser({ uploadedBy: ownerId });
     assert.equal(records.length, 1);
     assert.equal(records[0].uploadedBy, ownerId);
+    assert.equal(records[0].title, "My upload");
   } finally {
-    S3Client.prototype.send = originalSend;
     Note.find = originalFind;
-    for (const [name, value] of Object.entries(savedEnvironment)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
   }
-
-  assert.deepEqual(listedPrefixes, [`metadata/users/${ownerId}/`]);
-  assert.deepEqual(fetchedKeys, [`metadata/${noteId}.json`]);
 });
 
-test("dashboard note listing uses the account index instead of scanning all notes", async () => {
+test("dashboard note listing reads from MongoDB", async () => {
   const originalFindById = User.findById;
   const originalFind = Note.find;
   const originalCountDocuments = Note.countDocuments;
-  const originalListUserRecords = s3Storage.listNoteRecordsForUser;
-  const originalListAllRecords = s3Storage.listNoteRecords;
   const ownerId = new mongoose.Types.ObjectId().toString();
   const records = [
     { _id: "note-one", uploadedBy: ownerId, title: "First", createdAt: "2026-01-02" },
     { _id: "note-two", uploadedBy: ownerId, title: "Second", createdAt: "2026-01-01" },
   ];
-  let listedOwner;
   let responseBody;
-  User.findById = () => ({ select: async () => ({ notesIndexInitialized: true }) });
+  User.findById = () => ({});
   Note.find = () => ({
     sort() { return this; },
+    skip() { return this; },
     limit() { return this; },
-    select: async () => [],
+    select: async () => records,
+    lean: async () => records,
   });
-  Note.countDocuments = async () => 0;
-  s3Storage.listNoteRecordsForUser = async ({ uploadedBy }) => {
-    listedOwner = uploadedBy;
-    return records;
-  };
-  s3Storage.listNoteRecords = async () => assert.fail("Dashboard must not scan every S3 note");
+  Note.countDocuments = async () => 2;
 
   try {
     await listMyNotes(
@@ -1307,42 +1269,29 @@ test("dashboard note listing uses the account index instead of scanning all note
     User.findById = originalFindById;
     Note.find = originalFind;
     Note.countDocuments = originalCountDocuments;
-    s3Storage.listNoteRecordsForUser = originalListUserRecords;
-    s3Storage.listNoteRecords = originalListAllRecords;
   }
 
-  assert.equal(listedOwner, ownerId);
   assert.deepEqual(responseBody.notes.map(({ title }) => title), ["First", "Second"]);
   assert.deepEqual(responseBody.pagination, { page: 1, limit: 30, total: 2, totalPages: 1 });
-  assert.equal("uploadedBy" in responseBody.notes[0], false);
-  assert.equal("s3Key" in responseBody.notes[0], false);
 });
 
-test("dashboard note listing caches a user's legacy S3 records once", async () => {
+test("dashboard note listing reads only the current user's notes from MongoDB", async () => {
   const originalFindById = User.findById;
-  const originalUpdateOne = User.updateOne;
   const originalFind = Note.find;
   const originalCountDocuments = Note.countDocuments;
-  const originalListRecords = s3Storage.listNoteRecords;
-  const originalPutUserIndex = s3Storage.putUserNoteIndex;
   const ownerId = new mongoose.Types.ObjectId().toString();
   const userNote = { _id: "legacy-note", uploadedBy: ownerId, title: "Legacy upload" };
-  const foreignNote = { _id: "other-note", uploadedBy: new mongoose.Types.ObjectId().toString() };
-  let indexedNotes = [];
-  let initializedAccount;
+  const foreignNote = { _id: "other-note", uploadedBy: new mongoose.Types.ObjectId().toString(), title: "Foreign" };
   let responseBody;
-  User.findById = () => ({ select: async () => ({ notesIndexInitialized: false }) });
-  User.updateOne = async (filter, update) => {
-    initializedAccount = { filter, update };
-  };
+  User.findById = () => ({});
   Note.find = () => ({
     sort() { return this; },
+    skip() { return this; },
     limit() { return this; },
-    select: async () => [],
+    select: async () => [userNote],
+    lean: async () => [userNote],
   });
-  Note.countDocuments = async () => 0;
-  s3Storage.listNoteRecords = async () => [userNote, foreignNote];
-  s3Storage.putUserNoteIndex = async (note) => indexedNotes.push(note);
+  Note.countDocuments = async () => 1;
 
   try {
     await listMyNotes(
@@ -1354,202 +1303,70 @@ test("dashboard note listing caches a user's legacy S3 records once", async () =
     );
   } finally {
     User.findById = originalFindById;
-    User.updateOne = originalUpdateOne;
     Note.find = originalFind;
     Note.countDocuments = originalCountDocuments;
-    s3Storage.listNoteRecords = originalListRecords;
-    s3Storage.putUserNoteIndex = originalPutUserIndex;
   }
 
-  assert.deepEqual(indexedNotes, [userNote]);
-  assert.deepEqual(initializedAccount, {
-    filter: { _id: ownerId },
-    update: { $set: { notesIndexInitialized: true } },
-  });
   assert.deepEqual(responseBody.notes.map(({ title }) => title), ["Legacy upload"]);
   assert.equal(responseBody.pagination.total, 1);
 });
 
-test("note records list from current and legacy metadata prefixes", async () => {
-  const savedEnvironment = {
-    AWS_REGION: process.env.AWS_REGION,
-    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-  };
-  const originalSend = S3Client.prototype.send;
+test("note records list from MongoDB only", async () => {
   const originalFind = Note.find;
   const currentId = "imported notes 2024";
   const legacyId = "4f4152a7-45bc-4c73-b2d0-468c8bc3c5a1";
-  const listedPrefixes = [];
-  const fetchedKeys = [];
-  process.env.AWS_REGION = "ap-south-1";
-  process.env.AWS_S3_BUCKET = "notes-test-bucket";
-  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
-  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
   Note.find = () => ({
-    select() { return this; },
-    lean: async () => [],
+    lean: async () => [
+      { _id: currentId, s3MetadataId: currentId, title: "Current", uploadStatus: "active" },
+      { _id: legacyId, s3MetadataId: legacyId, title: "Legacy", uploadStatus: "active" },
+    ],
   });
-  S3Client.prototype.send = async (command) => {
-    if (command instanceof ListObjectsV2Command) {
-      listedPrefixes.push(command.input.Prefix);
-      return {
-        Contents: command.input.Prefix === "metadata/"
-          ? [{ Key: `metadata/${currentId}.json` }]
-          : [{ Key: `notes/metadata/${legacyId}.json` }],
-      };
-    }
-    if (command instanceof GetObjectCommand) {
-      fetchedKeys.push(command.input.Key);
-      if (command.input.Key === `metadata/${legacyId}.json`) {
-        const error = new Error("Not found");
-        error.name = "NoSuchKey";
-        throw error;
-      }
-      const isLegacy = command.input.Key === `notes/metadata/${legacyId}.json`;
-      return {
-        Body: {
-          transformToString: async () => JSON.stringify({
-            _id: isLegacy ? legacyId : currentId,
-            title: isLegacy ? "Legacy" : "Current",
-          }),
-        },
-      };
-    }
-    throw new Error("Unexpected S3 command");
-  };
 
   try {
     const records = await s3Storage.listNoteRecords();
-    assert.deepEqual(records.map(({ title }) => title), ["Current", "Legacy"]);
+    assert.deepEqual(records.map(({ title }) => title).sort(), ["Current", "Legacy"]);
   } finally {
-    S3Client.prototype.send = originalSend;
     Note.find = originalFind;
-    for (const [name, value] of Object.entries(savedEnvironment)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
   }
-
-  assert.deepEqual(listedPrefixes, ["metadata/", "notes/metadata/"]);
-  assert.ok(fetchedKeys.includes(`metadata/${legacyId}.json`));
-  assert.ok(fetchedKeys.includes(`notes/metadata/${legacyId}.json`));
 });
 
-test("S3 note page reads only the requested metadata records", async () => {
-  const savedEnvironment = {
-    AWS_REGION: process.env.AWS_REGION,
-    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-  };
-  const originalSend = S3Client.prototype.send;
+test("note page reads only the requested MongoDB records", async () => {
   const originalFind = Note.find;
+  const originalCountDocuments = Note.countDocuments;
   const ids = Array.from({ length: 75 }, (_, index) => `paged-note-${index}`);
-  const fetchedIds = [];
-  process.env.AWS_REGION = "ap-south-1";
-  process.env.AWS_S3_BUCKET = "notes-test-bucket";
-  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
-  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
   Note.find = () => ({
-    select() { return this; },
-    lean: async () => [],
+    sort() { return this; },
+    skip() { return this; },
+    limit() { return this; },
+    select: async () => ids.slice(30, 60).map((id) => ({ _id: id, s3MetadataId: id, title: id, uploadStatus: "active" })),
+    lean: async () => ids.slice(30, 60).map((id) => ({ _id: id, s3MetadataId: id, title: id, uploadStatus: "active" })),
   });
-  S3Client.prototype.send = async (command) => {
-    if (command instanceof ListObjectsV2Command) {
-      return {
-        Contents: command.input.Prefix === "metadata/"
-          ? ids.map((id, index) => ({
-              Key: `metadata/${id}.json`,
-              LastModified: new Date(2026, 0, index + 1),
-            }))
-          : [],
-      };
-    }
-    if (command instanceof GetObjectCommand) {
-      const id = command.input.Key.slice("metadata/".length, -".json".length);
-      fetchedIds.push(id);
-      return {
-        Body: {
-          transformToString: async () => JSON.stringify({ _id: id, title: id }),
-        },
-      };
-    }
-    throw new Error("Unexpected S3 command");
-  };
+  Note.countDocuments = async () => 75;
 
   try {
     const result = await s3Storage.listNoteRecordPage({ offset: 30, limit: 30 });
     assert.equal(result.total, 75);
     assert.equal(result.records.length, 30);
-    assert.equal(fetchedIds.length, 30);
-    assert.equal(result.records[0]._id, "paged-note-44");
-    assert.equal(result.records[29]._id, "paged-note-15");
+    assert.equal(result.records[0]._id, "paged-note-30");
+    assert.equal(result.records[29]._id, "paged-note-59");
   } finally {
-    S3Client.prototype.send = originalSend;
     Note.find = originalFind;
-    for (const [name, value] of Object.entries(savedEnvironment)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
+    Note.countDocuments = originalCountDocuments;
   }
 });
 
-test("note records are fetched concurrently with a bounded number of S3 requests", async () => {
-  const savedEnvironment = {
-    AWS_REGION: process.env.AWS_REGION,
-    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-  };
-  const originalSend = S3Client.prototype.send;
+test("note records are fetched from MongoDB without S3 requests", async () => {
   const originalFind = Note.find;
   const ids = Array.from({ length: 30 }, (_, index) => `note-${index}`);
-  let activeRequests = 0;
-  let maxConcurrentRequests = 0;
-  process.env.AWS_REGION = "ap-south-1";
-  process.env.AWS_S3_BUCKET = "notes-test-bucket";
-  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
-  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
   Note.find = () => ({
-    select() { return this; },
-    lean: async () => [],
+    lean: async () => ids.map((id) => ({ _id: id, s3MetadataId: id, title: id, uploadStatus: "active" })),
   });
-  S3Client.prototype.send = async (command) => {
-    if (command instanceof ListObjectsV2Command) {
-      return {
-        Contents: command.input.Prefix === "metadata/"
-          ? ids.map((id) => ({ Key: `metadata/${id}.json` }))
-          : [],
-      };
-    }
-    if (command instanceof GetObjectCommand) {
-      activeRequests += 1;
-      maxConcurrentRequests = Math.max(maxConcurrentRequests, activeRequests);
-      await new Promise((resolve) => setTimeout(resolve, 1));
-      activeRequests -= 1;
-      return {
-        Body: {
-          transformToString: async () => JSON.stringify({ _id: command.input.Key }),
-        },
-      };
-    }
-    throw new Error("Unexpected S3 command");
-  };
 
   try {
     const records = await s3Storage.listNoteRecords();
     assert.equal(records.length, ids.length);
-    assert.ok(maxConcurrentRequests > 1);
-    assert.ok(maxConcurrentRequests <= 25);
   } finally {
-    S3Client.prototype.send = originalSend;
     Note.find = originalFind;
-    for (const [name, value] of Object.entries(savedEnvironment)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
   }
 });
 
@@ -2111,29 +1928,33 @@ test("public S3 notes can still be downloaded without signing in", async () => {
   assert.equal(redirectUrl, "https://signed-download.example.test");
 });
 
-test("S3 note deletion marks the record before removing the object", async () => {
+test("note deletion marks the record before removing the object", async () => {
   const originals = {
-    getNoteRecord: s3Storage.getNoteRecord,
-    putNoteRecord: s3Storage.putNoteRecord,
+    findOne: Note.findOne,
+    updateOne: Note.updateOne,
+    deleteOne: Note.deleteOne,
     deleteObject: s3Storage.deleteObject,
-    deleteNoteRecord: s3Storage.deleteNoteRecord,
   };
-  const noteId = "b9c84b91-d865-42e5-bd2f-2030d9663209";
+  const noteId = new mongoose.Types.ObjectId().toString();
   const ownerId = new mongoose.Types.ObjectId().toString();
   const operations = [];
   let responseBody;
-  s3Storage.getNoteRecord = async () => ({
+  Note.findOne = async () => ({
     _id: noteId,
     uploadedBy: ownerId,
     s3Key: "notes/user/object-key",
     uploadStatus: "active",
+    save: async () => {},
   });
-  s3Storage.putNoteRecord = async (note) => {
-    assert.equal(note.uploadStatus, "deleting");
+  Note.updateOne = async () => {
     operations.push("mark-deleting");
+    return { modifiedCount: 1 };
   };
   s3Storage.deleteObject = async () => operations.push("delete-object");
-  s3Storage.deleteNoteRecord = async () => operations.push("delete-record");
+  Note.deleteOne = async () => {
+    operations.push("delete-record");
+    return { deletedCount: 1 };
+  };
 
   try {
     await deleteMyNote(
@@ -2149,10 +1970,10 @@ test("S3 note deletion marks the record before removing the object", async () =>
       }
     );
   } finally {
-    s3Storage.getNoteRecord = originals.getNoteRecord;
-    s3Storage.putNoteRecord = originals.putNoteRecord;
+    Note.findOne = originals.findOne;
+    Note.updateOne = originals.updateOne;
+    Note.deleteOne = originals.deleteOne;
     s3Storage.deleteObject = originals.deleteObject;
-    s3Storage.deleteNoteRecord = originals.deleteNoteRecord;
   }
 
   assert.deepEqual(operations, ["mark-deleting", "delete-object", "delete-record"]);
@@ -2161,21 +1982,23 @@ test("S3 note deletion marks the record before removing the object", async () =>
 
 test("failed S3 deletion leaves the note marked for a safe retry", async () => {
   const originals = {
-    getNoteRecord: s3Storage.getNoteRecord,
-    putNoteRecord: s3Storage.putNoteRecord,
+    findOne: Note.findOne,
+    updateOne: Note.updateOne,
     deleteObject: s3Storage.deleteObject,
   };
   const ownerId = new mongoose.Types.ObjectId().toString();
   let uploadStatus;
   let responseStatus;
-  s3Storage.getNoteRecord = async () => ({
+  Note.findOne = async () => ({
     _id: "4f4152a7-45bc-4c73-b2d0-468c8bc3c5a1",
     uploadedBy: ownerId,
     s3Key: "notes/user/object-key",
     uploadStatus: "active",
+    save: async () => {},
   });
-  s3Storage.putNoteRecord = async (note) => {
-    uploadStatus = note.uploadStatus;
+  Note.updateOne = async (filter, update) => {
+    uploadStatus = update.$set.uploadStatus;
+    return { modifiedCount: 1 };
   };
   s3Storage.deleteObject = async () => {
     throw new Error("S3 unavailable");
@@ -2194,8 +2017,8 @@ test("failed S3 deletion leaves the note marked for a safe retry", async () => {
       }
     );
   } finally {
-    s3Storage.getNoteRecord = originals.getNoteRecord;
-    s3Storage.putNoteRecord = originals.putNoteRecord;
+    Note.findOne = originals.findOne;
+    Note.updateOne = originals.updateOne;
     s3Storage.deleteObject = originals.deleteObject;
   }
 

@@ -11,6 +11,8 @@
     "start": "node index.js",
     "seed:admin": "node scripts/seed-admin.js",
     "migrate:s3": "node scripts/migrate-to-s3.js",
+"migrate:s3-metadata-to-mongo": "node --env-file=.env scripts/migrate-s3-metadata-to-mongodb.js --apply",
+"migrate:s3-metadata-to-mongo:dry": "node --env-file=.env scripts/migrate-s3-metadata-to-mongodb.js --dry-run",
     "migrate:s3-metadata:dry": "node --env-file=.env scripts/sync-s3-metadata.js --dry-run",
     "migrate:s3-metadata:backup": "node --env-file=.env scripts/sync-s3-metadata.js --backup",
     "migrate:s3-metadata": "node --env-file=.env scripts/sync-s3-metadata.js --apply",
