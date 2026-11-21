@@ -21,7 +21,10 @@ const authEncryptionKeyError = (code, message) => {
 const getKeyPair = () => {
   if (keyPair) return keyPair;
 
-  const configuredPrivateKey = getAppSecrets().authEncryptionPrivateKey?.replace(/\\n/g, "\n");
+  const configuredPrivateKey = getAppSecrets().authEncryptionPrivateKey
+    ?.replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\r\n?/g, "\n");
   if (configuredPrivateKey) {
     let privateKey;
     let publicKey;
