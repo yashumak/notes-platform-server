@@ -31,11 +31,27 @@ const getKeyPair = () => {
     try {
       privateKey = createPrivateKey(configuredPrivateKey);
       publicKey = createPublicKey(privateKey);
-    } catch {
-      throw authEncryptionKeyError(
+    } catch (cause) {
+      const error = authEncryptionKeyError(
         "AUTH_ENCRYPTION_KEY_INVALID_FORMAT",
         "AUTH_ENCRYPTION_PRIVATE_KEY must be an unencrypted PEM private key"
       );
+      const pem = configuredPrivateKey.match(
+        /-----BEGIN ([A-Z ]*PRIVATE KEY)-----([\s\S]*?)-----END ([A-Z ]*PRIVATE KEY)-----/
+      );
+      const encodedBody = pem?.[2].replace(/\s/g, "");
+      error.diagnostics = {
+        parserCode: /^ERR_[A-Z0-9_]+$/.test(cause?.code || "") ? cause.code : "UNKNOWN",
+        hasPrivateKeyHeader: /^-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(configuredPrivateKey),
+        hasPrivateKeyFooter: /-----END (?:RSA )?PRIVATE KEY-----\s*$/.test(configuredPrivateKey),
+        matchingPemLabels: Boolean(pem && pem[1] === pem[3]),
+        bodyLooksBase64: Boolean(
+          encodedBody &&
+          encodedBody.length % 4 === 0 &&
+          /^[A-Za-z0-9+/]+={0,2}$/.test(encodedBody)
+        ),
+      };
+      throw error;
     }
     if (publicKey.asymmetricKeyType !== "rsa") {
       throw authEncryptionKeyError(

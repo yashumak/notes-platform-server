@@ -56,7 +56,10 @@ try {
       error.code.startsWith("AUTH_ENCRYPTION_KEY_")
     ? error.code
     : "AUTH_ENCRYPTION_KEY_INVALID";
-  logError("startup.auth_encryption_key_invalid_or_missing", { reason });
+  logError("startup.auth_encryption_key_invalid_or_missing", {
+    reason,
+    ...(error?.diagnostics ? { diagnostics: error.diagnostics } : {}),
+  });
   process.exit(1);
 }
 
