@@ -1,6 +1,3 @@
-import dotenv from "dotenv";
-dotenv.config();
-
 import { appendFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -13,6 +10,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import mongoose from "mongoose";
+import { loadAppSecrets, getAppSecrets } from "../config/secrets.js";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
 import { sanitizeFileName } from "../utils/fileValidation.js";
@@ -523,16 +521,17 @@ const verifyExistingReference = async (s3, bucket, key, file, contentType) => {
 };
 
 const runMigration = async ({ mode, backupId }) => {
-  const bucket = process.env.AWS_S3_BUCKET;
-  const region = process.env.AWS_REGION || "ap-south-1";
-  if (!process.env.MONGO_URI) {
+  const secrets = getAppSecrets();
+  const bucket = secrets.s3Bucket;
+  const region = secrets.awsRegion;
+  if (!secrets.mongoUri) {
     throw migrationError("MONGO_URI_MISSING", "MONGO_URI is required");
   }
   if (!bucket) {
     throw migrationError("S3_BUCKET_MISSING", "AWS_S3_BUCKET is required");
   }
 
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(secrets.mongoUri);
   const db = mongoose.connection.db;
   const noteCollection = db.collection(Note.collection.name);
   const userCollection = db.collection(User.collection.name);
@@ -803,6 +802,7 @@ const runMigration = async ({ mode, backupId }) => {
 
 const main = async () => {
   const options = parseArguments(process.argv.slice(2));
+  await loadAppSecrets();
   await runMigration(options);
 };
 

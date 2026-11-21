@@ -1,9 +1,11 @@
 import mongoose from "mongoose";
 import { logError, logInfo } from "../utils/logger.js";
+import { getAppSecrets } from "./secrets.js";
 
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
+    const { mongoUri } = getAppSecrets();
+    await mongoose.connect(mongoUri, {
       ...(process.env.NODE_ENV === "production" ? { tls: true } : {}),
     });
 

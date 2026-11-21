@@ -10,6 +10,7 @@ import { authCookieOptions } from "./auth.controller.js";
 import { logError } from "../utils/logger.js";
 import { getMaxNoteFileSizeBytes } from "../utils/fileValidation.js";
 import { s3Storage } from "../services/s3Storage.js";
+import { getAppSecrets } from "../config/secrets.js";
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const cleanQuery = (value, maxLength = 100) =>
@@ -184,7 +185,7 @@ export const adminLogin = async (req, res) => {
     await trackActivity(user._id, "ADMIN_LOGIN", true);
     const token = jwt.sign(
       { id: user._id, user_id: user.user_id },
-      process.env.JWT_SECRET,
+      getAppSecrets().jwtSecret,
       { expiresIn: AUTH_SESSION_SECONDS, algorithm: "HS256" }
     );
     return res.cookie("token", token, {
@@ -1119,7 +1120,7 @@ export const getSettings = (_req, res) => {
       platformName: "NotesHub",
       uploadLimitBytes: getMaxNoteFileSizeBytes(),
       allowedUploadExtensions: [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".txt", ".csv", ".md", ".json", ".xml", ".jpg", ".jpeg", ".png", ".gif", ".webp"],
-      fileStorage: process.env.AWS_S3_BUCKET ? "S3 (private bucket)" : "S3 is not configured",
+      fileStorage: getAppSecrets().s3Bucket ? "S3 (private bucket)" : "S3 is not configured",
       note: "Runtime and credential settings are deployment-managed and cannot be changed from the admin panel.",
     });
   } catch {

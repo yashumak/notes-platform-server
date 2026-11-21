@@ -449,23 +449,19 @@ test("protected sessions enforce current account status", async () => {
 });
 
 test("session verification returns authentication state without profile or credential data", async () => {
-  const originalFindById = User.findById;
   const user = { _id: "private-user-id" };
   let responseBody;
   const headers = {};
-  User.findById = () => ({ select: async () => user });
-
-  try {
-    await verifyUser(
-      { user: { id: user._id, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 } },
-      {
-        setHeader(name, value) { headers[name] = value; },
-        json(body) { responseBody = body; },
-      }
-    );
-  } finally {
-    User.findById = originalFindById;
-  }
+  await verifyUser(
+    {
+      user: { id: user._id, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 },
+      authenticatedUser: user,
+    },
+    {
+      setHeader(name, value) { headers[name] = value; },
+      json(body) { responseBody = body; },
+    }
+  );
 
   assert.equal(responseBody.isAuthenticated, true);
   assert.equal(typeof responseBody.expiresAt, "number");
@@ -477,15 +473,22 @@ test("session verification returns authentication state without profile or crede
 });
 
 test("session verification does not read or migrate profile photo data", async () => {
-  const originalFindById = User.findById;
   const userId = new mongoose.Types.ObjectId().toString();
+  let userLookedUp = false;
+  const originalFindById = User.findById;
+  User.findById = () => {
+    userLookedUp = true;
+    throw new Error("session verification must not query user again");
+  };
   const user = { _id: userId };
   let responseBody;
-  User.findById = () => ({ select: async () => user });
 
   try {
     await verifyUser(
-      { user: { id: userId, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 } },
+      {
+        user: { id: userId, iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 },
+        authenticatedUser: user,
+      },
       {
         setHeader() {},
         json(body) { responseBody = body; },
@@ -496,6 +499,7 @@ test("session verification does not read or migrate profile photo data", async (
   }
 
   assert.deepEqual(Object.keys(responseBody).sort(), ["expiresAt", "isAuthenticated"]);
+  assert.equal(userLookedUp, false);
 });
 
 test("authenticated profile response contains only the caller's profile DTO", async () => {

@@ -1,13 +1,24 @@
-import dotenv from "dotenv";
-dotenv.config();
-
 import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
 import User from "../models/User.js";
 import { generateUserId } from "../utils/userId.js";
+import { loadAppSecrets, getAppSecrets } from "../config/secrets.js";
+
+await loadAppSecrets();
 
 const required = (name) => {
-  const value = process.env[name]?.trim();
+  const adminNames = {
+    ADMIN_NAME: "name",
+    ADMIN_EMAIL: "email",
+    ADMIN_PASSWORD: "password",
+    ADMIN_UNIVERSITY: "university",
+    ADMIN_COURSE: "course",
+    ADMIN_YEAR: "year",
+  };
+  const config = getAppSecrets();
+  const value = adminNames[name]
+    ? config.admin?.[adminNames[name]]?.trim()
+    : process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
 };

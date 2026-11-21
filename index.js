@@ -1,9 +1,3 @@
-// 🔥 LOAD ENV FIRST (VERY IMPORTANT)
-import dotenv from "dotenv";
-dotenv.config(); // loads backend/.env automatically
-
-// ❌ DO NOT IMPORT ANYTHING ABOVE THIS LINE
-
 import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
@@ -12,18 +6,30 @@ import { logError, logInfo } from "./utils/logger.js";
 import { initializeAuthPayloadEncryption } from "./utils/authPayloadEncryption.js";
 import { apiRequestLogger } from "./middlewares/apiRequestLogger.js";
 import { requireHttps } from "./middlewares/requireHttps.js";
-import {
-  generalApiLimiter,
-  initializeRateLimitStore,
-} from "./middlewares/rateLimiters.js";
+import { loadAppSecrets } from "./config/secrets.js";
 
-// Routes
-import authRoutes from "./routes/auth.routes.js";
-import notesRoutes from "./routes/notes.routes.js";
-import adminRoutes from "./routes/admin.routes.js";
+let appConfig;
+try {
+  appConfig = await loadAppSecrets();
+} catch (error) {
+  logError("startup.secrets_load_failed");
+  console.error(error.message);
+  process.exit(1);
+}
 
-// DB
-import connectDB from "./config/db.js";
+const [
+  { default: authRoutes },
+  { default: notesRoutes },
+  { default: adminRoutes },
+  { default: connectDB },
+  { generalApiLimiter, initializeRateLimitStore },
+] = await Promise.all([
+  import("./routes/auth.routes.js"),
+  import("./routes/notes.routes.js"),
+  import("./routes/admin.routes.js"),
+  import("./config/db.js"),
+  import("./middlewares/rateLimiters.js"),
+]);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -38,7 +44,7 @@ app.set("trust proxy", trustedProxyHops);
 
 app.use(requireHttps);
 
-if (!process.env.JWT_SECRET || Buffer.byteLength(process.env.JWT_SECRET) < 32) {
+if (!appConfig.jwtSecret || Buffer.byteLength(appConfig.jwtSecret) < 32) {
   logError("startup.jwt_secret_missing_or_weak");
   process.exit(1);
 }
@@ -49,9 +55,6 @@ try {
   logError("startup.auth_encryption_key_invalid_or_missing");
   process.exit(1);
 }
-
-// ------------------ DATABASE ------------------
-connectDB();
 
 // ------------------ MIDDLEWARE ------------------
 app.use(
@@ -128,6 +131,7 @@ app.use((err, _req, res, _next) => {
 // ------------------ SERVER ------------------
 const startServer = async () => {
   try {
+    await connectDB();
     await initializeRateLimitStore();
     app.listen(PORT, () => {
       logInfo("server.started");

@@ -10,6 +10,7 @@ import mongoose from "mongoose";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
 import { hasValidFileSignature, sanitizeFileName } from "../utils/fileValidation.js";
+import { getAppSecrets } from "../config/secrets.js";
 
 export const UPLOAD_URL_TTL_SECONDS = 300;
 export const DOWNLOAD_URL_TTL_SECONDS = 120;
@@ -19,15 +20,24 @@ let client;
 let configuredRegion;
 
 const getStorageConfig = () => {
-  const region = process.env.AWS_REGION || "ap-south-1";
-  const bucket = process.env.AWS_S3_BUCKET;
+  const secrets = getAppSecrets();
+  const region = secrets.awsRegion || process.env.AWS_REGION || "ap-south-1";
+  const bucket = secrets.s3Bucket || process.env.AWS_S3_BUCKET;
   if (!bucket) {
     const error = new Error("S3 storage is not configured");
     error.code = "S3_CONFIGURATION_MISSING";
     throw error;
   }
   if (!client || configuredRegion !== region) {
-    client = new S3Client({ region });
+    const credentials =
+      secrets.awsAccessKeyId && secrets.awsSecretAccessKey
+        ? {
+            accessKeyId: secrets.awsAccessKeyId,
+            secretAccessKey: secrets.awsSecretAccessKey,
+            ...(secrets.awsSessionToken ? { sessionToken: secrets.awsSessionToken } : {}),
+          }
+        : undefined;
+    client = new S3Client({ region, ...(credentials ? { credentials } : {}) });
     configuredRegion = region;
   }
   return { client, bucket };

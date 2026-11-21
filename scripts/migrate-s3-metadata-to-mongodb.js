@@ -1,10 +1,10 @@
-import dotenv from "dotenv";
-dotenv.config();
-
 import { ListObjectsV2Command, GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import mongoose from "mongoose";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
+import { loadAppSecrets, getAppSecrets } from "../config/secrets.js";
+
+await loadAppSecrets();
 
 const METADATA_PREFIX = "metadata/";
 const BATCH_SIZE = 25;
@@ -76,12 +76,13 @@ const withRetry = async (fn, attempt = 1) => {
 };
 
 const run = async ({ mode }) => {
-  if (!process.env.MONGO_URI) throw migrationError("MONGO_URI_MISSING", "MONGO_URI is required");
-  const bucket = process.env.AWS_S3_BUCKET;
+  const secrets = getAppSecrets();
+  if (!secrets.mongoUri) throw migrationError("MONGO_URI_MISSING", "MONGO_URI is required");
+  const bucket = secrets.s3Bucket;
   if (!bucket) throw migrationError("S3_BUCKET_MISSING", "AWS_S3_BUCKET is required");
-  const region = process.env.AWS_REGION || "ap-south-1";
+  const region = secrets.awsRegion;
 
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(secrets.mongoUri);
   const client = new S3Client({ region });
 
   const report = createReport(mode);

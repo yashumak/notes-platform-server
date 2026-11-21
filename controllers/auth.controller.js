@@ -8,6 +8,7 @@ import { hasValidFileSignature } from "../utils/fileValidation.js";
 import { ensureUserId, generateUserId } from "../utils/userId.js";
 import { s3Storage } from "../services/s3Storage.js";
 import UserActivity from "../models/UserActivity.js";
+import { getAppSecrets } from "../config/secrets.js";
 
 const BCRYPT_ROUNDS = 12;
 const PROFILE_PHOTO_PREFIX = "photos/";
@@ -160,7 +161,7 @@ export const registerUser = async (req, res) => {
     }
 
     await recordActivity(user._id, "ACCOUNT_CREATED", true);
-    const token = jwt.sign({ id: user._id, user_id: user.user_id }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: user._id, user_id: user.user_id }, getAppSecrets().jwtSecret, {
       expiresIn: AUTH_SESSION_SECONDS,
       algorithm: "HS256",
     });
@@ -196,7 +197,7 @@ export const loginUser = async (req, res) => {
     user.lastLoginAt = new Date();
     await user.save();
     await recordActivity(user._id, "LOGIN", true);
-    const token = jwt.sign({ id: user._id, user_id: userId }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: user._id, user_id: userId }, getAppSecrets().jwtSecret, {
       expiresIn: AUTH_SESSION_SECONDS,
       algorithm: "HS256",
     });
@@ -225,9 +226,7 @@ export const verifyUser = async (req, res) => {
     req.user.exp,
     req.user.iat + AUTH_SESSION_SECONDS
   ) * 1000;
-  const user = await User.findById(req.user.id).select("_id");
-
-  if (!user) {
+  if (!req.authenticatedUser) {
     return res.status(401).json({ isAuthenticated: false, message: "Not authenticated" });
   }
 

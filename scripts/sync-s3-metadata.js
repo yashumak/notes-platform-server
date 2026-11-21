@@ -1,6 +1,3 @@
-import dotenv from "dotenv";
-dotenv.config();
-
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -12,6 +9,9 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import mongoose from "mongoose";
+import { loadAppSecrets, getAppSecrets } from "../config/secrets.js";
+
+await loadAppSecrets();
 import Note from "../models/Note.js";
 import User from "../models/User.js";
 
@@ -606,11 +606,12 @@ const verifyState = async ({ plan, report }) => {
 };
 
 const run = async ({ mode, backupId }) => {
-  if (!process.env.MONGO_URI) throw migrationError("MONGO_URI_MISSING", "MONGO_URI is required");
-  const bucket = process.env.AWS_S3_BUCKET;
+  const secrets = getAppSecrets();
+  if (!secrets.mongoUri) throw migrationError("MONGO_URI_MISSING", "MONGO_URI is required");
+  const bucket = secrets.s3Bucket;
   if (!bucket) throw migrationError("S3_BUCKET_MISSING", "AWS_S3_BUCKET is required");
-  const region = process.env.AWS_REGION || "ap-south-1";
-  await mongoose.connect(process.env.MONGO_URI);
+  const region = secrets.awsRegion;
+  await mongoose.connect(secrets.mongoUri);
   const client = new S3Client({ region });
   await mkdir(REPORT_DIRECTORY, { recursive: true });
   const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "")}_${randomUUID().slice(0, 8)}`;

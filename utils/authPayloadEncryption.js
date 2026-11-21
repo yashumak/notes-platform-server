@@ -7,6 +7,7 @@ import {
   generateKeyPairSync,
   privateDecrypt,
 } from "node:crypto";
+import { getAppSecrets } from "../config/secrets.js";
 
 const MAX_AUTH_PAYLOAD_BYTES = 64 * 1024;
 let keyPair;
@@ -14,7 +15,7 @@ let keyPair;
 const getKeyPair = () => {
   if (keyPair) return keyPair;
 
-  const configuredPrivateKey = process.env.AUTH_ENCRYPTION_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  const configuredPrivateKey = getAppSecrets().authEncryptionPrivateKey?.replace(/\\n/g, "\n");
   if (configuredPrivateKey) {
     const privateKey = createPrivateKey(configuredPrivateKey);
     const publicKey = createPublicKey(privateKey);

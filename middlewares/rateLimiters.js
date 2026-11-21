@@ -9,6 +9,7 @@ import {
   isDedicatedRateLimitRequest,
   isPublicNotesListRequest,
 } from "../utils/rateLimitPolicy.js";
+import { getAppSecrets } from "../config/secrets.js";
 
 dotenv.config();
 
@@ -43,7 +44,7 @@ export const rateLimitPolicies = Object.freeze({
   publicNotesList: policy("PUBLIC_NOTES_LIST", 60_000, 60),
 });
 
-const redisUrl = process.env.REDIS_URL?.trim();
+const redisUrl = getAppSecrets().redisUrl?.trim();
 const redisClient = redisUrl ? createClient({ url: redisUrl }) : undefined;
 if (redisClient) {
   redisClient.on("error", () => {
@@ -122,10 +123,10 @@ const getNormalizedAccountIdentifier = (value) =>
 
 export const loginAccountKey = (req) => {
   const identifier = getNormalizedAccountIdentifier(req.body?.email);
-  if (!process.env.JWT_SECRET) {
+  if (!getAppSecrets().jwtSecret) {
     throw new Error("JWT_SECRET is required to derive the login rate-limit key");
   }
-  return `account:${createHmac("sha256", process.env.JWT_SECRET).update(identifier).digest("hex")}`;
+  return `account:${createHmac("sha256", getAppSecrets().jwtSecret).update(identifier).digest("hex")}`;
 };
 
 export const generalApiLimiter = createRateLimiter("general", rateLimitPolicies.generalApi, {

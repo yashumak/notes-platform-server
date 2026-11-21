@@ -12,6 +12,7 @@ import { s3Storage, UPLOAD_URL_TTL_SECONDS } from "../services/s3Storage.js";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
 import UserActivity from "../models/UserActivity.js";
+import { getAppSecrets } from "../config/secrets.js";
 
 const getNoteFilesBucket = () =>
   new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
@@ -80,7 +81,7 @@ const makeUploadMetadata = (body, safeName) => {
 
 const verifyUploadToken = (token, userId) => {
   try {
-    const claims = jwt.verify(token, process.env.JWT_SECRET, {
+    const claims = jwt.verify(token, getAppSecrets().jwtSecret, {
       algorithms: ["HS256"],
       issuer: UPLOAD_TOKEN_ISSUER,
       audience: UPLOAD_TOKEN_AUDIENCE,
@@ -196,7 +197,7 @@ export const createNoteUploadUrl = async (req, res) => {
         fileSize: file.fileSize,
         ...metadata,
       },
-      process.env.JWT_SECRET,
+      getAppSecrets().jwtSecret,
       {
         algorithm: "HS256",
         expiresIn: UPLOAD_TOKEN_TTL_SECONDS,

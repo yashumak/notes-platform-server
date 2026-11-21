@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { getAppSecrets } from "../config/secrets.js";
 import { AUTH_SESSION_SECONDS } from "../config/auth.js";
 import User from "../models/User.js";
 import { logError } from "../utils/logger.js";
@@ -12,7 +13,7 @@ export const protect = async (req, res, next) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET, {
+    decoded = jwt.verify(token, getAppSecrets().jwtSecret, {
       algorithms: ["HS256"],
     });
     if (
@@ -53,7 +54,7 @@ export const optionalProtect = (req, _res, next) => {
   if (!token) return next();
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+    const decoded = jwt.verify(token, getAppSecrets().jwtSecret, {
       algorithms: ["HS256"],
     });
     if (
