@@ -46,14 +46,26 @@ export const rateLimitPolicies = Object.freeze({
 
 const redisUrl = getAppSecrets().redisUrl?.trim();
 const redisClient = redisUrl ? createClient({ url: redisUrl }) : undefined;
+let redisConnectionPromise;
 if (redisClient) {
   redisClient.on("error", () => {
     logError("rate_limit.redis_connection_error");
   });
 }
 
+const ensureRedisConnected = async () => {
+  if (!redisClient || redisClient.isOpen) return;
+  if (!redisConnectionPromise) {
+    redisConnectionPromise = redisClient.connect().finally(() => {
+      redisConnectionPromise = undefined;
+    });
+  }
+  await redisConnectionPromise;
+};
+
 const sendRedisCommand = async (...args) => {
   try {
+    await ensureRedisConnected();
     return await redisClient.sendCommand(args);
   } catch (cause) {
     const error = new Error("Shared rate-limit storage is unavailable", { cause });
@@ -68,9 +80,10 @@ export const initializeRateLimitStore = async () => {
     error.code = "RATE_LIMIT_REDIS_URL_MISSING";
     throw error;
   }
-  if (redisClient && !redisClient.isOpen) {
+  if (redisClient) {
+    const wasOpen = redisClient.isOpen;
     try {
-      await redisClient.connect();
+      await ensureRedisConnected();
     } catch (cause) {
       const error = new Error("Could not connect to the configured shared rate-limit store", {
         cause,
@@ -78,7 +91,7 @@ export const initializeRateLimitStore = async () => {
       error.code = "RATE_LIMIT_REDIS_CONNECTION_FAILED";
       throw error;
     }
-    logInfo("rate_limit.redis_connected");
+    if (!wasOpen) logInfo("rate_limit.redis_connected");
   }
 };
 

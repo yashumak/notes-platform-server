@@ -51,8 +51,12 @@ if (!appConfig.jwtSecret || Buffer.byteLength(appConfig.jwtSecret) < 32) {
 
 try {
   initializeAuthPayloadEncryption();
-} catch {
-  logError("startup.auth_encryption_key_invalid_or_missing");
+} catch (error) {
+  const reason = typeof error?.code === "string" &&
+      error.code.startsWith("AUTH_ENCRYPTION_KEY_")
+    ? error.code
+    : "AUTH_ENCRYPTION_KEY_INVALID";
+  logError("startup.auth_encryption_key_invalid_or_missing", { reason });
   process.exit(1);
 }
 

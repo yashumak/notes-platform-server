@@ -12,25 +12,49 @@ import { getAppSecrets } from "../config/secrets.js";
 const MAX_AUTH_PAYLOAD_BYTES = 64 * 1024;
 let keyPair;
 
+const authEncryptionKeyError = (code, message) => {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+};
+
 const getKeyPair = () => {
   if (keyPair) return keyPair;
 
   const configuredPrivateKey = getAppSecrets().authEncryptionPrivateKey?.replace(/\\n/g, "\n");
   if (configuredPrivateKey) {
-    const privateKey = createPrivateKey(configuredPrivateKey);
-    const publicKey = createPublicKey(privateKey);
-    if (
-      publicKey.asymmetricKeyType !== "rsa" ||
-      (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048
-    ) {
-      throw new Error("AUTH_ENCRYPTION_PRIVATE_KEY must be an RSA key of at least 2048 bits");
+    let privateKey;
+    let publicKey;
+    try {
+      privateKey = createPrivateKey(configuredPrivateKey);
+      publicKey = createPublicKey(privateKey);
+    } catch {
+      throw authEncryptionKeyError(
+        "AUTH_ENCRYPTION_KEY_INVALID_FORMAT",
+        "AUTH_ENCRYPTION_PRIVATE_KEY must be an unencrypted PEM private key"
+      );
+    }
+    if (publicKey.asymmetricKeyType !== "rsa") {
+      throw authEncryptionKeyError(
+        "AUTH_ENCRYPTION_KEY_NOT_RSA",
+        "AUTH_ENCRYPTION_PRIVATE_KEY must be an RSA key"
+      );
+    }
+    if ((publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) {
+      throw authEncryptionKeyError(
+        "AUTH_ENCRYPTION_KEY_TOO_WEAK",
+        "AUTH_ENCRYPTION_PRIVATE_KEY must be at least 2048 bits"
+      );
     }
     keyPair = {
       privateKey,
       publicKey: publicKey.export({ type: "spki", format: "pem" }).toString(),
     };
   } else if (process.env.NODE_ENV === "production") {
-    throw new Error("AUTH_ENCRYPTION_PRIVATE_KEY must be configured in production");
+    throw authEncryptionKeyError(
+      "AUTH_ENCRYPTION_KEY_MISSING",
+      "AUTH_ENCRYPTION_PRIVATE_KEY must be configured in production"
+    );
   } else {
     const generated = generateKeyPairSync("rsa", {
       modulusLength: 3072,
