@@ -1374,6 +1374,39 @@ test("note records are fetched from MongoDB without S3 requests", async () => {
   }
 });
 
+test("S3 note lookups avoid casting UUID metadata IDs as MongoDB ObjectIds", async () => {
+  const originals = {
+    findOne: Note.findOne,
+    deleteOne: Note.deleteOne,
+  };
+  const uuid = "7c78e950-3026-4fef-8290-0e4508aa2718";
+  const objectId = new mongoose.Types.ObjectId().toString();
+  const lookups = [];
+  const deletions = [];
+  Note.findOne = (filter) => {
+    lookups.push(filter);
+    return { lean: async () => null };
+  };
+  Note.deleteOne = async (filter) => {
+    deletions.push(filter);
+  };
+
+  try {
+    await s3Storage.getNoteRecord(uuid);
+    await s3Storage.deleteNoteRecord(uuid);
+    await s3Storage.getNoteRecord(objectId);
+  } finally {
+    Note.findOne = originals.findOne;
+    Note.deleteOne = originals.deleteOne;
+  }
+
+  assert.deepEqual(lookups[0], { $or: [{ s3MetadataId: uuid }] });
+  assert.deepEqual(deletions[0], { $or: [{ s3MetadataId: uuid }] });
+  assert.deepEqual(lookups[1], {
+    $or: [{ s3MetadataId: objectId }, { _id: objectId }],
+  });
+});
+
 test("S3 upload verification checks size, MIME, encryption, and file signature", async () => {
   const savedEnvironment = {
     AWS_REGION: process.env.AWS_REGION,

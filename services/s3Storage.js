@@ -244,9 +244,9 @@ export const s3Storage = {
 
   async getNoteRecord(id) {
     if (typeof id !== "string") return null;
-    const record = await Note.findOne({
-      $or: [{ _id: id }, { s3MetadataId: id }],
-    }).lean();
+    const alternatives = [{ s3MetadataId: id }];
+    if (mongoose.isValidObjectId(id)) alternatives.push({ _id: id });
+    const record = await Note.findOne({ $or: alternatives }).lean();
     return serializeStoredNote(record);
   },
 
@@ -282,6 +282,8 @@ export const s3Storage = {
 
   async deleteNoteRecord(id, { uploadedBy } = {}) {
     if (typeof id !== "string") throw new Error("Invalid note record ID");
-    await Note.deleteOne({ $or: [{ _id: id }, { s3MetadataId: id }] });
+    const alternatives = [{ s3MetadataId: id }];
+    if (mongoose.isValidObjectId(id)) alternatives.push({ _id: id });
+    await Note.deleteOne({ $or: alternatives });
   },
 };
