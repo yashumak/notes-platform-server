@@ -239,6 +239,7 @@ export const completeNoteUpload = async (req, res) => {
   }
 
   let objectVerified = false;
+  let failureStage = "existing_note_lookup";
   try {
     const existingNote = await s3Storage.getNoteRecord(claims.noteId);
     if (existingNote) {
@@ -260,6 +261,7 @@ export const completeNoteUpload = async (req, res) => {
       return res.status(409).json({ message: "This upload has already been associated with a note" });
     }
 
+    failureStage = "s3_object_verification";
     const s3ObjectMetadata = await s3Storage.verifyUploadedObject({
       key: claims.key,
       contentType: claims.contentType,
@@ -289,6 +291,7 @@ export const completeNoteUpload = async (req, res) => {
       uploadStatus: "active",
       createdAt: new Date().toISOString(),
     };
+    failureStage = "mongo_metadata_save";
     await s3Storage.putNoteRecord(note);
     recordUserActivity(req.user.id, "NOTE_UPLOAD", note._id);
     return res.status(201).json({
@@ -316,7 +319,7 @@ export const completeNoteUpload = async (req, res) => {
         logError("notes.upload_cleanup_deferred");
       }
     }
-    logError("notes.upload_complete_failed");
+    logNotesOperationFailure(`notes.upload_complete_failed.${failureStage}`, error);
     return res.status(500).json({ message: "Could not save uploaded note" });
   }
 };
