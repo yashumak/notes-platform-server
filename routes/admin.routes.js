@@ -12,6 +12,7 @@ import {
   getAnalytics,
   getSettings,
   getUser,
+  listFeedback,
   listActivity,
   listAuditLogs,
   listMedia,
@@ -64,6 +65,7 @@ router.delete("/users/:id", ...requireAdmin, softDeleteUser);
 router.get("/registrations", ...requireAdmin, listUsers);
 
 router.get("/notes", ...requireAdmin, listNotes);
+router.get("/feedback", ...requireAdmin, listFeedback);
 router.get("/notes/:id", ...requireAdmin, getAdminNote);
 router.patch("/notes/:id", ...requireAdmin, updateNote);
 router.delete("/notes/:id", ...requireAdmin, deleteNote);

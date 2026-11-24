@@ -14,6 +14,7 @@ uploads, private file access, and administrator tools.
 - JWT-backed authentication with secure, hashed passwords
 - Note listing, search, filtering, pagination, upload, and owner-controlled
   deletion
+- Guest and signed-in feedback submissions with validation and rate limiting
 - Private S3 file storage with validated, short-lived presigned upload and
   download URLs
 - MongoDB persistence with continued support for existing GridFS notes
@@ -21,6 +22,10 @@ uploads, private file access, and administrator tools.
   media, activity, analytics, and audit logs
 - Request validation, rate limiting, security headers, and structured,
   sensitive-data-aware logging
+
+Feedback is stored in the `feedback` MongoDB collection. Signed-in submissions
+include a server-verified user snapshot; guest submissions remain anonymous.
+Administrators can view paginated feedback through `GET /api/admin/feedback`.
 
 ## Technology
 
@@ -40,8 +45,8 @@ backend/
 ├── config/          # auth.js, db.js
 ├── controllers/     # admin, auth, and notes controllers
 ├── middlewares/     # Authentication, validation, logging, and rate limits
-├── models/          # AdminAuditLog, Note, User, and UserActivity
-├── routes/          # Admin, auth, and notes API routes
+├── models/          # AdminAuditLog, Feedback, Note, User, and UserActivity
+├── routes/          # Admin, auth, feedback, and notes API routes
 ├── scripts/         # seed-admin.js
 ├── services/        # S3 storage operations
 ├── test/            # Automated tests

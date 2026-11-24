@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import { getAppSecrets } from "../config/secrets.js";
 import { AUTH_SESSION_SECONDS } from "../config/auth.js";
@@ -49,24 +50,42 @@ export const protect = async (req, res, next) => {
   return next();
 };
 
-export const optionalProtect = (req, _res, next) => {
+export const optionalProtect = async (req, res, next) => {
   const token = req.cookies?.token;
   if (!token) return next();
 
+  let decoded;
   try {
-    const decoded = jwt.verify(token, getAppSecrets().jwtSecret, {
+    decoded = jwt.verify(token, getAppSecrets().jwtSecret, {
       algorithms: ["HS256"],
     });
     if (
-      typeof decoded !== "string" &&
-      typeof decoded.iat === "number" &&
-      typeof decoded.exp === "number" &&
-      Date.now() < (decoded.iat + AUTH_SESSION_SECONDS) * 1000
+      typeof decoded === "string" ||
+      typeof decoded.iat !== "number" ||
+      typeof decoded.exp !== "number" ||
+      Date.now() >= (decoded.iat + AUTH_SESSION_SECONDS) * 1000 ||
+      typeof decoded.id !== "string" ||
+      !mongoose.isValidObjectId(decoded.id)
     ) {
-      req.user = decoded;
+      return next();
     }
   } catch {
-    // Public notes remain accessible if an optional session cookie is invalid.
+    return next();
   }
+
+  let user;
+  try {
+    user = await User.findById(decoded.id).select("name email role accountStatus deletedAt");
+  } catch {
+    logError("auth.optional_account_check_failed");
+    return res.status(503).json({ message: "Could not verify session" });
+  }
+
+  if (!user || user.deletedAt || (user.accountStatus && user.accountStatus !== "active")) {
+    return next();
+  }
+
+  req.user = decoded;
+  req.authenticatedUser = user;
   return next();
 };

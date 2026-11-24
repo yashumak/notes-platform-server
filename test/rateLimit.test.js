@@ -15,6 +15,8 @@ process.env.RATE_LIMIT_PASSWORD_CHANGE_WINDOW_MS = "60000";
 process.env.RATE_LIMIT_PASSWORD_CHANGE_MAX = "2";
 process.env.RATE_LIMIT_NOTES_UPLOAD_WINDOW_MS = "60000";
 process.env.RATE_LIMIT_NOTES_UPLOAD_MAX = "2";
+process.env.RATE_LIMIT_FEEDBACK_WINDOW_MS = "60000";
+process.env.RATE_LIMIT_FEEDBACK_MAX = "2";
 process.env.RATE_LIMIT_NOTES_SEARCH_WINDOW_MS = "60000";
 process.env.RATE_LIMIT_NOTES_SEARCH_MAX = "2";
 process.env.RATE_LIMIT_PUBLIC_NOTES_LIST_WINDOW_MS = "60000";
@@ -28,6 +30,7 @@ process.env.RATE_LIMIT_OTP_VERIFICATION_MAX = "5";
 
 const {
   generalApiLimiter,
+  feedbackLimiter,
   loginAccountLimiter,
   loginIpLimiter,
   initializeRateLimitStore,
@@ -52,6 +55,9 @@ app.post("/api/auth/change-password", passwordChangeLimiter, (_req, res) =>
   res.json({ success: true })
 );
 app.post("/api/notes/upload/presign", notesUploadLimiter, (_req, res) =>
+  res.status(201).json({ success: true })
+);
+app.post("/api/feedback", feedbackLimiter, (_req, res) =>
   res.status(201).json({ success: true })
 );
 app.get("/api/notes", notesSearchLimiter, publicNotesListLimiter, (_req, res) =>
@@ -181,12 +187,31 @@ test("signup, uploads, notes search, listing, and general APIs have independent 
           ? "POST"
           : "GET",
     });
+
     assert.equal(response.status, 429, `${path} should enforce its limit`);
   }
 
   assert.equal((await request("/api/notes?q=course", { ip: "198.51.100.43" })).status, 200);
   assert.equal((await request("/api/notes", { ip: "198.51.100.42" })).status, 200);
   assert.equal((await request("/api/notes/stats", { ip: "198.51.100.46" })).status, 200);
+});
+
+test("feedback submissions are rate limited by client IP", async () => {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await request("/api/feedback", {
+      ip: "198.51.100.91",
+      method: "POST",
+      body: { feedback: "A useful suggestion" },
+    });
+    assert.equal(response.status, 201);
+  }
+  const blocked = await request("/api/feedback", {
+    ip: "198.51.100.91",
+    method: "POST",
+    body: { feedback: "One more suggestion" },
+  });
+  assert.equal(blocked.status, 429);
+  assert.ok(Number(blocked.headers.get("retry-after")) > 0);
 });
 
 test("configured future reset policies and API exemptions are explicit", () => {

@@ -47,11 +47,18 @@ const validateRequired = (config) => {
   }
 };
 
-const mapSecrets = (stored) => {
+export const mapSecrets = (stored, env = process.env) => {
   const mongoUri = firstDefined(stored, ["MONGO_URI", "mongo_uri", "mongodbUri", "MONGODB_URI"]);
   const jwtSecret = firstDefined(stored, ["JWT_SECRET", "jwtSecret", "jwt_secret"]);
   const frontendUrl = firstDefined(stored, ["FRONTEND_URL", "frontendUrl", "frontend_url"]);
-  const redisUrl = firstDefined(stored, ["REDIS_URL", "redisUrl", "redis_url"]);
+  const useInMemoryRateLimit =
+    env.NODE_ENV !== "production" &&
+    env.RATE_LIMIT_STORAGE?.trim().toLowerCase() === "memory";
+  const redisUrl = useInMemoryRateLimit
+    ? undefined
+    : env.NODE_ENV !== "production" && env.REDIS_URL !== undefined
+      ? env.REDIS_URL.trim() || undefined
+      : firstDefined(stored, ["REDIS_URL", "redisUrl", "redis_url"]);
   const awsRegion = firstDefined(stored, ["AWS_REGION", "awsRegion", "region"]) ||
     process.env.AWS_REGION?.trim() || "ap-south-1";
   const s3Bucket = firstDefined(stored, ["AWS_S3_BUCKET", "awsS3Bucket", "s3Bucket"]);

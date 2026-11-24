@@ -40,6 +40,7 @@ export const rateLimitPolicies = Object.freeze({
   forgotPassword: policy("FORGOT_PASSWORD", 15 * 60_000, 3),
   otpVerification: policy("OTP_VERIFICATION", 10 * 60_000, 5),
   notesUpload: policy("NOTES_UPLOAD", 10 * 60_000, 10),
+  feedback: policy("FEEDBACK", 15 * 60_000, 5),
   notesSearch: policy("NOTES_SEARCH", 60_000, 30),
   publicNotesList: policy("PUBLIC_NOTES_LIST", 60_000, 60),
 });
@@ -173,6 +174,10 @@ export const otpVerificationLimiter = createRateLimiter(
 export const notesUploadLimiter = createRateLimiter(
   "notes-upload",
   rateLimitPolicies.notesUpload
+);
+export const feedbackLimiter = createRateLimiter(
+  "feedback",
+  rateLimitPolicies.feedback
 );
 export const notesSearchLimiter = createRateLimiter(
   "notes-search",

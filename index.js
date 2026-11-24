@@ -21,12 +21,14 @@ const [
   { default: authRoutes },
   { default: notesRoutes },
   { default: adminRoutes },
+  { default: feedbackRoutes },
   { default: connectDB },
   { generalApiLimiter, initializeRateLimitStore },
 ] = await Promise.all([
   import("./routes/auth.routes.js"),
   import("./routes/notes.routes.js"),
   import("./routes/admin.routes.js"),
+  import("./routes/feedback.routes.js"),
   import("./config/db.js"),
   import("./middlewares/rateLimiters.js"),
 ]);
@@ -81,6 +83,7 @@ app.use(cookieParser());
 app.use("/api/auth", authRoutes);
 app.use("/api/notes", notesRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/feedback", feedbackRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ message: "Not found" });

@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import AdminAuditLog from "../models/AdminAuditLog.js";
+import Feedback from "../models/Feedback.js";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
 import UserActivity from "../models/UserActivity.js";
@@ -559,6 +560,54 @@ export const listNotes = async (req, res) => {
   } catch {
     logError("admin.notes_list_failed");
     return res.status(503).json({ message: "Could not load notes from the configured storage" });
+  }
+};
+
+export const listFeedback = async (req, res) => {
+  const { page, limit, skip } = pagination(req.query);
+  try {
+    const [feedbackEntries, total] = await Promise.all([
+      Feedback.find()
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Feedback.countDocuments(),
+    ]);
+    const legacyUserIds = [
+      ...new Set(
+        feedbackEntries
+          .filter((entry) => !entry.user_info)
+          .map((entry) => entry.user || entry.userId)
+          .filter((id) => mongoose.isValidObjectId(id))
+          .map(String)
+      ),
+    ];
+    const legacyUsers = legacyUserIds.length
+      ? await User.find({ _id: { $in: legacyUserIds } }).select("name email").lean()
+      : [];
+    const legacyUsersById = new Map(legacyUsers.map((user) => [String(user._id), user]));
+    const records = feedbackEntries.map((entry) => {
+      const legacyUserId = entry.user || entry.userId;
+      const user = legacyUsersById.get(String(legacyUserId));
+      const userInfo = entry.user_info || (user
+        ? { user_Id: String(legacyUserId), name: user.name, email: user.email }
+        : null);
+      return {
+        id: String(entry._id),
+        feedback: entry.feedback,
+        user_info: userInfo,
+        isAuthenticated: typeof entry.isAuthenticated === "boolean"
+          ? entry.isAuthenticated
+          : Boolean(legacyUserId),
+        createdAt: entry.createdAt,
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return sendPage(res, records, total, page, limit);
+  } catch {
+    logError("admin.feedback_list_failed");
+    return res.status(503).json({ message: "Could not load feedback" });
   }
 };
 
