@@ -787,9 +787,16 @@ export const getDashboard = async (_req, res) => {
       /^[a-zA-Z0-9_-]{1,60}$/.test(String(error.code))
         ? String(error.code)
         : "NoCode";
+    const errorLocationMatch =
+      typeof error?.stack === "string"
+        ? error.stack.match(/admin\.controller\.js:(\d+):(\d+)/)
+        : null;
     logError("admin.dashboard_load_failed", {
       errorName,
       errorCode,
+      errorLocation: errorLocationMatch
+        ? `${errorLocationMatch[1]}:${errorLocationMatch[2]}`
+        : "Unknown",
       databaseReadyState: mongoose.connection.readyState,
     });
     return res.status(503).json({ message: "Could not load live dashboard data" });
