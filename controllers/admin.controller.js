@@ -777,8 +777,21 @@ export const getDashboard = async (_req, res) => {
       recentNotes: combinedRecentNotes,
       recentAdminActions,
     });
-  } catch {
-    logError("admin.dashboard_load_failed");
+  } catch (error) {
+    const errorName =
+      typeof error?.name === "string" && /^[a-zA-Z0-9_-]{1,60}$/.test(error.name)
+        ? error.name
+        : "UnknownError";
+    const errorCode =
+      (typeof error?.code === "string" || typeof error?.code === "number") &&
+      /^[a-zA-Z0-9_-]{1,60}$/.test(String(error.code))
+        ? String(error.code)
+        : "NoCode";
+    logError("admin.dashboard_load_failed", {
+      errorName,
+      errorCode,
+      databaseReadyState: mongoose.connection.readyState,
+    });
     return res.status(503).json({ message: "Could not load live dashboard data" });
   }
 };
