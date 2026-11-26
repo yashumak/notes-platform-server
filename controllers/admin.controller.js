@@ -742,8 +742,10 @@ export const getDashboard = async (_req, res) => {
     const mongoBytes = mongoNoteStats.reduce((total, item) => total + (item.storageBytes || 0), 0);
     const recentUsersOut = recentUsers.map(userDto);
     const recentUploaderIds = [...new Set(
-      recentMongoNotes.map((note) => String(note.uploadedBy))
-    ).filter((id) => mongoose.isValidObjectId(id))];
+      recentMongoNotes
+        .map((note) => String(note.uploadedBy))
+        .filter((id) => mongoose.isValidObjectId(id))
+    )];
     const mongoUploaders = await User.find({ _id: { $in: recentUploaderIds } }).select("name email");
     const uploaderById = new Map(mongoUploaders.map((user) => [String(user._id), user]));
     const combinedRecentNotes = recentMongoNotes

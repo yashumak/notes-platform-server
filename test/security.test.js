@@ -31,6 +31,7 @@ import {
   listMyNotes,
   listNotes,
 } from "../controllers/notes.controller.js";
+import { getDashboard } from "../controllers/admin.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
 import { hasValidFileSignature, validateFileMetadata } from "../utils/fileValidation.js";
 import {
@@ -46,6 +47,8 @@ import {
 } from "../controllers/auth.controller.js";
 import Note from "../models/Note.js";
 import User from "../models/User.js";
+import AdminAuditLog from "../models/AdminAuditLog.js";
+import UserActivity from "../models/UserActivity.js";
 import connectDB from "../config/db.js";
 import { ensureUserId, generateUserId } from "../utils/userId.js";
 import {
@@ -1372,6 +1375,90 @@ test("note records are fetched from MongoDB without S3 requests", async () => {
   } finally {
     Note.find = originalFind;
   }
+});
+
+test("admin dashboard deduplicates valid recent-note uploader IDs", async () => {
+  const originals = {
+    userAggregate: User.aggregate,
+    userFind: User.find,
+    userCountDocuments: User.countDocuments,
+    noteAggregate: Note.aggregate,
+    noteFind: Note.find,
+    auditFind: AdminAuditLog.find,
+    activityCountDocuments: UserActivity.countDocuments,
+  };
+  const userId = new mongoose.Types.ObjectId();
+  const uploaderId = new mongoose.Types.ObjectId();
+  const invalidUploaderId = "not-an-object-id";
+  const recentUser = {
+    _id: userId,
+    user_id: "1234567890",
+    name: "Recent User",
+    email: "recent@example.test",
+    createdAt: new Date("2026-01-03T00:00:00Z"),
+  };
+  const recentNotes = [
+    {
+      _id: new mongoose.Types.ObjectId(),
+      title: "Uploaded note",
+      fileName: "note.pdf",
+      uploadedBy: uploaderId,
+      createdAt: new Date("2026-01-02T00:00:00Z"),
+    },
+    {
+      _id: new mongoose.Types.ObjectId(),
+      title: "Legacy note",
+      fileName: "legacy.pdf",
+      uploadedBy: invalidUploaderId,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+    },
+  ];
+  const uploader = { _id: uploaderId, name: "Uploader", email: "uploader@example.test" };
+  const thenableQuery = (result) => ({
+    select() { return this; },
+    sort() { return this; },
+    limit() { return this; },
+    populate() { return this; },
+    then(resolve, reject) { return Promise.resolve(result).then(resolve, reject); },
+  });
+  let uploaderLookupIds;
+  let responseStatus = 200;
+  let responseBody;
+
+  User.aggregate = async () => [{ _id: "active", count: 1 }];
+  User.find = (filter) => {
+    if (filter._id?.$in) {
+      uploaderLookupIds = filter._id.$in;
+      return thenableQuery([uploader]);
+    }
+    return thenableQuery([recentUser]);
+  };
+  User.countDocuments = async () => 0;
+  Note.aggregate = async () => [{ _id: "public", count: 2, storageBytes: 120 }];
+  Note.find = () => thenableQuery(recentNotes);
+  AdminAuditLog.find = () => thenableQuery([]);
+  UserActivity.countDocuments = async () => 0;
+
+  try {
+    await getDashboard({}, {
+      setHeader() {},
+      status(status) { responseStatus = status; return this; },
+      json(body) { responseBody = body; return this; },
+    });
+  } finally {
+    User.aggregate = originals.userAggregate;
+    User.find = originals.userFind;
+    User.countDocuments = originals.userCountDocuments;
+    Note.aggregate = originals.noteAggregate;
+    Note.find = originals.noteFind;
+    AdminAuditLog.find = originals.auditFind;
+    UserActivity.countDocuments = originals.activityCountDocuments;
+  }
+
+  assert.equal(responseStatus, 200);
+  assert.deepEqual(uploaderLookupIds, [uploaderId.toString()]);
+  assert.equal(responseBody.recentNotes[0].uploader.name, "Uploader");
+  assert.equal(responseBody.recentNotes[1].uploader, null);
 });
 
 test("S3 note lookups avoid casting UUID metadata IDs as MongoDB ObjectIds", async () => {

@@ -101,9 +101,14 @@ notepad .env
 
 Edit `.env` and set at least `MONGO_URI`, `JWT_SECRET` (at least 32 bytes),
 `FRONTEND_URL`, and `AWS_S3_BUCKET`. `AWS_REGION` defaults to `ap-south-1`.
-For local development, provide AWS credentials through the AWS credential
-provider chain or in this backend-only `.env` file. Never put AWS credentials
-in frontend configuration or commit secrets.
+The backend uses AWS Secrets Manager if `MONGO_URI` and `JWT_SECRET` are not
+both set locally. For local development without AWS access, run MongoDB and set
+`MONGO_URI` and a unique `JWT_SECRET` in `.env`; the Admin key endpoint will
+return 502 while the Main Backend is unavailable. See `.env.example` for a
+local MongoDB URI and a command to generate a suitable JWT secret.
+When using AWS Secrets Manager or S3 locally, provide AWS credentials through
+the AWS credential provider chain or in this backend-only `.env` file. Never
+put AWS credentials in frontend configuration or commit secrets.
 
 For development, `AUTH_ENCRYPTION_PRIVATE_KEY` can be omitted; the backend
 generates an ephemeral key pair. Login and registration sessions will not
