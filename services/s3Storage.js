@@ -2,6 +2,7 @@ import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -227,6 +228,54 @@ export const s3Storage = {
         Key: key,
         ResponseContentDisposition: "inline",
         ResponseContentType: contentType,
+        ResponseCacheControl: "private, no-store",
+      }),
+      { expiresIn: DOWNLOAD_URL_TTL_SECONDS }
+    );
+  },
+
+  async listBucketObjectPage({ continuationToken, limit }) {
+    const { client: s3Client, bucket } = getStorageConfig();
+    const response = await s3Client.send(new ListObjectsV2Command({
+      Bucket: bucket,
+      MaxKeys: limit,
+      ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+    }));
+    const nextToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+    if (response.IsTruncated && !nextToken) {
+      throw new Error("S3 returned a truncated object page without a continuation token");
+    }
+    return {
+      bucketName: bucket,
+      objects: (response.Contents || [])
+        .filter((object) => typeof object.Key === "string")
+        .map((object) => ({
+          s3Key: object.Key,
+          sizeBytes: Number.isSafeInteger(object.Size) ? object.Size : null,
+          lastModified: object.LastModified instanceof Date
+            ? object.LastModified.toISOString()
+            : null,
+          eTag: typeof object.ETag === "string" ? object.ETag : null,
+          storageClass: typeof object.StorageClass === "string"
+            ? object.StorageClass
+            : "STANDARD",
+        })),
+      nextToken: nextToken || null,
+    };
+  },
+
+  async createBucketObjectDownloadUrl(key) {
+    if (typeof key !== "string" || !key || Buffer.byteLength(key, "utf8") > 1024) {
+      throw new Error("Invalid S3 object key");
+    }
+    const { client: s3Client, bucket } = getStorageConfig();
+    const fileName = key.split("/").pop() || "download";
+    return getSignedUrl(
+      s3Client,
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ResponseContentDisposition: formatContentDisposition(fileName),
         ResponseCacheControl: "private, no-store",
       }),
       { expiresIn: DOWNLOAD_URL_TTL_SECONDS }

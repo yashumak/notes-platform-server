@@ -31,7 +31,11 @@ import {
   listMyNotes,
   listNotes,
 } from "../controllers/notes.controller.js";
-import { getDashboard } from "../controllers/admin.controller.js";
+import {
+  downloadS3Object,
+  getDashboard,
+  listS3Objects,
+} from "../controllers/admin.controller.js";
 import { protect } from "../middlewares/authMiddleware.js";
 import { hasValidFileSignature, validateFileMetadata } from "../utils/fileValidation.js";
 import {
@@ -1461,6 +1465,146 @@ test("admin dashboard deduplicates valid recent-note uploader IDs", async () => 
   assert.equal(responseBody.recentNotes[1].uploader, null);
 });
 
+test("raw S3 inventory returns bucket objects without owner matching", async () => {
+  const originalListBucketObjectPage = s3Storage.listBucketObjectPage;
+  const bucketPage = {
+    bucketName: "test-bucket",
+    objects: [
+      {
+        s3Key: "notes/unmapped-owner/file.pdf",
+        sizeBytes: 123,
+        lastModified: "2026-01-01T00:00:00.000Z",
+        eTag: "\"test-etag\"",
+        storageClass: "STANDARD",
+      },
+    ],
+    nextToken: "next-page",
+  };
+  let pageRequest;
+  let responseStatus = 200;
+  let responseBody;
+  s3Storage.listBucketObjectPage = async (request) => {
+    pageRequest = request;
+    return bucketPage;
+  };
+
+  try {
+    await listS3Objects(
+      { query: { limit: "25", continuationToken: "opaque-cursor" } },
+      {
+        setHeader() {},
+        status(status) { responseStatus = status; return this; },
+        json(body) { responseBody = body; return this; },
+      }
+    );
+  } finally {
+    s3Storage.listBucketObjectPage = originalListBucketObjectPage;
+  }
+
+  assert.equal(responseStatus, 200);
+  assert.deepEqual(pageRequest, { continuationToken: "opaque-cursor", limit: 25 });
+  assert.deepEqual(responseBody, bucketPage);
+});
+
+test("raw S3 inventory reports missing bucket-list permission", async () => {
+  const originalListBucketObjectPage = s3Storage.listBucketObjectPage;
+  let responseStatus;
+  let responseBody;
+  s3Storage.listBucketObjectPage = async () => {
+    const error = new Error("Access denied");
+    error.name = "AccessDenied";
+    error.$metadata = { httpStatusCode: 403 };
+    throw error;
+  };
+
+  try {
+    await listS3Objects(
+      { query: {} },
+      {
+        status(status) { responseStatus = status; return this; },
+        json(body) { responseBody = body; return this; },
+      }
+    );
+  } finally {
+    s3Storage.listBucketObjectPage = originalListBucketObjectPage;
+  }
+
+  assert.equal(responseStatus, 503);
+  assert.match(responseBody.message, /cannot list objects/i);
+});
+
+test("raw S3 inventory endpoints require an administrator session", async () => {
+  const originalListBucketObjectPage = s3Storage.listBucketObjectPage;
+  const originalCreateBucketObjectDownloadUrl = s3Storage.createBucketObjectDownloadUrl;
+  let s3Accessed = false;
+  s3Storage.listBucketObjectPage = async () => {
+    s3Accessed = true;
+    return { bucketName: "test-bucket", objects: [], nextToken: null };
+  };
+  s3Storage.createBucketObjectDownloadUrl = async () => {
+    s3Accessed = true;
+    return "https://signed-download.example.test";
+  };
+
+  const app = express();
+  app.use(cookieParser());
+  app.use("/api/admin", adminRoutes);
+  const server = app.listen(0, "127.0.0.1");
+
+  try {
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const inventoryResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/admin/media/s3-objects`
+    );
+    const downloadResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/admin/media/s3-object/download?s3Key=notes%2Ffile.pdf`
+    );
+    assert.equal(inventoryResponse.status, 401);
+    assert.equal(downloadResponse.status, 401);
+    assert.equal(s3Accessed, false);
+  } finally {
+    s3Storage.listBucketObjectPage = originalListBucketObjectPage;
+    s3Storage.createBucketObjectDownloadUrl = originalCreateBucketObjectDownloadUrl;
+    await new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test("raw S3 object downloads do not require a MongoDB owner record", async () => {
+  const originalCreateBucketObjectDownloadUrl = s3Storage.createBucketObjectDownloadUrl;
+  const objectKey = "notes/unmapped-owner/file.pdf";
+  let requestedKey;
+  let redirectStatus;
+  let redirectUrl;
+  s3Storage.createBucketObjectDownloadUrl = async (key) => {
+    requestedKey = key;
+    return "https://signed-download.example.test";
+  };
+
+  try {
+    await downloadS3Object(
+      { query: { s3Key: objectKey } },
+      {
+        setHeader() { return this; },
+        redirect(status, url) {
+          redirectStatus = status;
+          redirectUrl = url;
+          return this;
+        },
+      }
+    );
+  } finally {
+    s3Storage.createBucketObjectDownloadUrl = originalCreateBucketObjectDownloadUrl;
+  }
+
+  assert.equal(requestedKey, objectKey);
+  assert.equal(redirectStatus, 302);
+  assert.equal(redirectUrl, "https://signed-download.example.test");
+});
+
 test("S3 note lookups avoid casting UUID metadata IDs as MongoDB ObjectIds", async () => {
   const originals = {
     findOne: Note.findOne,
@@ -1564,6 +1708,77 @@ test("S3 upload verification checks size, MIME, encryption, and file signature",
     );
     assert.equal(commands.length, commandCount + 1);
     assert.ok(commands.at(-1) instanceof HeadObjectCommand);
+  } finally {
+    S3Client.prototype.send = originalSend;
+    for (const [name, value] of Object.entries(savedEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("S3 bucket inventory maps raw object pages and requires a next token when truncated", async () => {
+  const savedEnvironment = {
+    AWS_REGION: process.env.AWS_REGION,
+    AWS_S3_BUCKET: process.env.AWS_S3_BUCKET,
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+  };
+  const originalSend = S3Client.prototype.send;
+  const pageResponse = {
+    IsTruncated: true,
+    NextContinuationToken: "next-page",
+    Contents: [
+      {
+        Key: "notes/unmapped-owner/file.pdf",
+        Size: 123,
+        LastModified: new Date("2026-01-01T00:00:00.000Z"),
+        ETag: "\"test-etag\"",
+        StorageClass: "STANDARD_IA",
+      },
+      { Size: 99 },
+    ],
+  };
+  let command;
+  process.env.AWS_REGION = "ap-south-1";
+  process.env.AWS_S3_BUCKET = "notes-test-bucket";
+  process.env.AWS_ACCESS_KEY_ID = "test-access-key";
+  process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
+  S3Client.prototype.send = async (request) => {
+    command = request;
+    return pageResponse;
+  };
+
+  try {
+    const result = await s3Storage.listBucketObjectPage({
+      continuationToken: "previous-page",
+      limit: 25,
+    });
+    assert.ok(command instanceof ListObjectsV2Command);
+    assert.deepEqual(command.input, {
+      Bucket: "notes-test-bucket",
+      MaxKeys: 25,
+      ContinuationToken: "previous-page",
+    });
+    assert.deepEqual(result, {
+      bucketName: "notes-test-bucket",
+      objects: [
+        {
+          s3Key: "notes/unmapped-owner/file.pdf",
+          sizeBytes: 123,
+          lastModified: "2026-01-01T00:00:00.000Z",
+          eTag: "\"test-etag\"",
+          storageClass: "STANDARD_IA",
+        },
+      ],
+      nextToken: "next-page",
+    });
+
+    pageResponse.NextContinuationToken = undefined;
+    await assert.rejects(
+      s3Storage.listBucketObjectPage({ limit: 25 }),
+      /truncated object page without a continuation token/
+    );
   } finally {
     S3Client.prototype.send = originalSend;
     for (const [name, value] of Object.entries(savedEnvironment)) {

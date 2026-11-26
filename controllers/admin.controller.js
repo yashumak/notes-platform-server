@@ -1084,6 +1084,74 @@ export const listMedia = async (req, res) => {
   }
 };
 
+export const listS3Objects = async (req, res) => {
+  const rawLimit = req.query.limit;
+  const requestedLimit = rawLimit === undefined ? 50 : Number(rawLimit);
+  if (
+    (rawLimit !== undefined && typeof rawLimit !== "string") ||
+    !Number.isSafeInteger(requestedLimit) ||
+    requestedLimit < 1
+  ) {
+    return res.status(400).json({ message: "Invalid S3 inventory page size" });
+  }
+  const rawContinuationToken = req.query.continuationToken;
+  if (
+    rawContinuationToken !== undefined &&
+    (
+      typeof rawContinuationToken !== "string" ||
+      rawContinuationToken.length === 0 ||
+      rawContinuationToken.length > 8192
+    )
+  ) {
+    return res.status(400).json({ message: "Invalid S3 inventory cursor" });
+  }
+
+  try {
+    const result = await s3Storage.listBucketObjectPage({
+      continuationToken: rawContinuationToken,
+      limit: Math.min(requestedLimit, 100),
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.json(result);
+  } catch (error) {
+    const errorCode = typeof error?.name === "string" &&
+        /^[a-zA-Z0-9_-]{1,60}$/.test(error.name)
+      ? error.name
+      : "UnknownError";
+    const isAccessDenied =
+      errorCode === "AccessDenied" || error?.$metadata?.httpStatusCode === 403;
+    logError("admin.s3_inventory_failed", { errorCode });
+    return res.status(503).json({
+      message: isAccessDenied
+        ? "The Main Backend AWS identity cannot list objects in the configured S3 bucket"
+        : "Could not load S3 bucket objects",
+    });
+  }
+};
+
+export const downloadS3Object = async (req, res) => {
+  const key = req.query.s3Key;
+  if (typeof key !== "string" || !key || Buffer.byteLength(key, "utf8") > 1024) {
+    return res.status(400).json({ message: "Invalid S3 object key" });
+  }
+  try {
+    const url = await s3Storage.createBucketObjectDownloadUrl(key);
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.redirect(302, url);
+  } catch (error) {
+    const errorCode = typeof error?.name === "string" &&
+        /^[a-zA-Z0-9_-]{1,60}$/.test(error.name)
+      ? error.name
+      : "UnknownError";
+    logError("admin.s3_object_download_failed", { errorCode });
+    return res.status(503).json({
+      message: errorCode === "AccessDenied" || error?.$metadata?.httpStatusCode === 403
+        ? "The Main Backend AWS identity cannot read this S3 object"
+        : "Could not access the requested S3 object",
+    });
+  }
+};
+
 export const downloadMedia = async (req, res) => {
   const { kind, id } = req.params;
   try {

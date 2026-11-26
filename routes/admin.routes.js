@@ -6,6 +6,7 @@ import {
   adminVerify,
   deleteNote,
   deleteProfilePhoto,
+  downloadS3Object,
   downloadMedia,
   getAdminNote,
   getDashboard,
@@ -16,6 +17,7 @@ import {
   listActivity,
   listAuditLogs,
   listMedia,
+  listS3Objects,
   listNotes,
   listUsers,
   setUserStatus,
@@ -71,6 +73,8 @@ router.patch("/notes/:id", ...requireAdmin, updateNote);
 router.delete("/notes/:id", ...requireAdmin, deleteNote);
 
 router.get("/media", ...requireAdmin, listMedia);
+router.get("/media/s3-objects", ...requireAdmin, listS3Objects);
+router.get("/media/s3-object/download", ...requireAdmin, downloadS3Object);
 router.get("/media/:kind/:id/download", ...requireAdmin, downloadMedia);
 router.delete("/media/profile/:id", ...requireAdmin, deleteProfilePhoto);
 

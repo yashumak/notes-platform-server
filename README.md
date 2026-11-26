@@ -218,6 +218,13 @@ and uses idempotent updates. Reports and privacy-safe error logs are written to
 left unchanged for manual review. The sync uses `MONGO_URI`, `AWS_S3_BUCKET`,
 `AWS_REGION` (default `ap-south-1`), and the AWS SDK credential provider chain.
 
+The Admin Media page also provides a separate raw S3 inventory. It paginates
+all objects in the configured bucket without matching them to MongoDB notes or
+users; downloads require `s3:GetObject` for the selected key. The backend AWS
+identity therefore needs `s3:ListBucket` on the configured bucket and
+`s3:GetObject` on the objects admins must inspect. This view does not import or
+modify MongoDB records or S3 objects.
+
 Technology| Purpose
 Node.js| JavaScript runtime
 Express.js| Backend framework
