@@ -60,6 +60,7 @@ app.post("/api/notes/upload/presign", notesUploadLimiter, (_req, res) =>
 app.post("/api/feedback", feedbackLimiter, (_req, res) =>
   res.status(201).json({ success: true })
 );
+app.get("/api/auth/encryption-key", (_req, res) => res.json({ publicKey: "test-key" }));
 app.get("/api/notes", notesSearchLimiter, publicNotesListLimiter, (_req, res) =>
   res.json({ success: true })
 );
@@ -214,6 +215,19 @@ test("feedback submissions are rate limited by client IP", async () => {
   assert.ok(Number(blocked.headers.get("retry-after")) > 0);
 });
 
+test("encryption-key requests do not consume or hit the general API limit", async () => {
+  const ip = "198.51.100.92";
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.equal((await request("/api/notes/stats", { ip })).status, 200);
+  }
+
+  const keyResponse = await request("/api/auth/encryption-key", { ip });
+  assert.equal(keyResponse.status, 200);
+  assert.deepEqual(await keyResponse.json(), { publicKey: "test-key" });
+
+  assert.equal((await request("/api/notes/stats", { ip })).status, 429);
+});
+
 test("configured future reset policies and API exemptions are explicit", () => {
   assert.deepEqual(rateLimitPolicies.forgotPassword, { windowMs: 900000, limit: 3 });
   assert.deepEqual(rateLimitPolicies.otpVerification, { windowMs: 600000, limit: 5 });
@@ -221,6 +235,14 @@ test("configured future reset policies and API exemptions are explicit", () => {
     method: "POST",
     originalUrl: "/api/auth/login",
   }), true);
+  assert.equal(isDedicatedRateLimitRequest({
+    method: "GET",
+    originalUrl: "/api/auth/encryption-key",
+  }), true);
+  assert.equal(isDedicatedRateLimitRequest({
+    method: "POST",
+    originalUrl: "/api/auth/encryption-key",
+  }), false);
   assert.equal(isDedicatedRateLimitRequest({
     method: "GET",
     originalUrl: "/api/notes/stats",

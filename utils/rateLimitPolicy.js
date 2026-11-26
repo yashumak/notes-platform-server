@@ -15,6 +15,7 @@ export const isPublicNotesListRequest = (req) =>
 
 export const isDedicatedRateLimitRequest = (req) => {
   const path = getRequestPath(req);
+  if (req.method === "GET" && path === "/api/auth/encryption-key") return true;
   if (
     path === "/api/auth/login" ||
     path === "/api/auth/register" ||
